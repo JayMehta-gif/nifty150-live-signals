@@ -9,6 +9,11 @@ on:
     - cron: "0,15,30,45 4-9 * * 1-5"
     - cron: "0,15,30 10 * * 1-5"
   workflow_dispatch:  # "Run workflow" button for manual tests
+    inputs:
+      test_telegram:
+        description: "Only send a Telegram test message (checks the secrets)"
+        type: boolean
+        default: false
 
 concurrency:
   group: live-signals
@@ -41,4 +46,4 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python -u nifty150_live_signals.py --once
+        run: python -u nifty150_live_signals.py ${{ inputs.test_telegram && '--test-telegram' || '--once' }}
