@@ -8,8 +8,12 @@ moment either strategy's signal FIRES on any Nifty150 stock (not on every
 bar — only on the state change).
 
 Strategies (locked configs from prior backtests):
-  - SuperTrend ATR(14) x 3.0, long-only         -> BUY on trend flip -1 -> 1
-  - ADX DI+/DI- [Gu5], long-only, skip-open-bar  -> BUY on condition -> 1 or 0.5
+  - SuperTrend ATR(14) x 3.0                    -> BUY on trend flip -1 -> 1
+                                                   SELL on trend flip 1 -> -1
+  - ADX DI+/DI- [Gu5], skip-open-bar             -> BUY on condition -> 1 or 0.5
+                                                   SELL on condition -> -1 or -0.5
+The BUY side is the backtested long-only config. SELL alerts are short-entry
+signals from the same indicators — they were NOT part of those backtests.
 
 Install:
     pip install yfinance pandas numpy numba curl_cffi
@@ -325,7 +329,8 @@ def show_toast(title, message):
 
     frame = tk.Frame(root, bg="#1e1e1e", padx=14, pady=12)
     frame.pack(fill="both", expand=True)
-    tk.Label(frame, text=title, bg="#1e1e1e", fg="#4ade80",
+    title_color = "#f87171" if "SELL" in title else "#4ade80"
+    tk.Label(frame, text=title, bg="#1e1e1e", fg=title_color,
               font=("Segoe UI", 11, "bold"), anchor="w", justify="left",
               wraplength=TOAST_WIDTH - 28).pack(fill="x")
     tk.Label(frame, text=message, bg="#1e1e1e", fg="#f0f0f0",
@@ -437,8 +442,13 @@ def scan_once(per_symbol_delay=None):
 
             if prev_st is not None and prev_st == -1 and st_trend == 1:
                 fired.append(("SuperTrend", symbol, "BUY", last_close, last_ts))
+            if prev_st is not None and prev_st == 1 and st_trend == -1:
+                fired.append(("SuperTrend", symbol, "SELL", last_close, last_ts))
             if prev_adx is not None and prev_adx not in (1.0, 0.5) and adx_cond in (1.0, 0.5):
                 label = "BUY_STRONG" if adx_cond == 1.0 else "BUY"
+                fired.append(("ADX_DI", symbol, label, last_close, last_ts))
+            if prev_adx is not None and prev_adx not in (-1.0, -0.5) and adx_cond in (-1.0, -0.5):
+                label = "SELL_STRONG" if adx_cond == -1.0 else "SELL"
                 fired.append(("ADX_DI", symbol, label, last_close, last_ts))
 
             state[symbol] = {"st_trend": st_trend, "adx_cond": adx_cond,
