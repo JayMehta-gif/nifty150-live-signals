@@ -987,10 +987,10 @@ def write_dashboard(state):
 document.documentElement.dataset.theme=t;}}catch(e){{}}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<title>Nifty150 Signals</title><style>{DASHBOARD_CSS}</style></head>
+<title>Technical Dashboard</title><style>{DASHBOARD_CSS}</style></head>
 <body data-scanned="{e(scanned_iso)}">
 <div class="top"><div class="wrap">
-<div class="bar1"><div class="brand"><div class="logo"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l5-5 4 4 8-9"/><path d="M15 7h5v5"/></svg></div><div style="min-width:0"><h1>Nifty150 Signals</h1>
+<div class="bar1"><div class="brand"><div class="logo"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l5-5 4 4 8-9"/><path d="M15 7h5v5"/></svg></div><div style="min-width:0"><h1>Technical Dashboard</h1>
 <div class="sub">SuperTrend ({ATR_PERIOD}×{MULTIPLIER:g}) + ADX DI · {sub}</div></div></div>
 <div class="tools-r"><span class="status" id="status"><i></i><span class="lbl">Waiting</span></span>
 <button class="iconbtn theme" id="theme" title="Light / dark" aria-label="Switch light or dark theme">

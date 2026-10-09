@@ -73,7 +73,7 @@ jobs:
           cp dashboard.html site/index.html
           npx --yes staticrypt@3 site/index.html -p "$DASHBOARD_PASSWORD" \
             -s 377a6f269badd7ffccacac9db8e9ed1b --config false -d public --short --remember 30 \
-            --template-title "Nifty150 Live Signals" \
+            --template-title "Technical Dashboard" \
             --template-instructions "Enter the dashboard password." \
             --template-button "Unlock" \
             --template-color-primary "#111827" --template-color-secondary "#f4f5f7"
