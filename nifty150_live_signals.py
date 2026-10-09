@@ -484,8 +484,8 @@ border:1px solid var(--line);border-radius:50%;background:var(--card);color:var(
 :root:not([data-theme="light"]) .theme .moon{display:none}}
 .status{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;
 font-size:12px;font-weight:600;background:var(--card);border:1px solid var(--line)}
-.status i{width:8px;height:8px;border-radius:50%;background:var(--up-line)}
-.status.live i{animation:pulse 2s infinite}.status.old{color:var(--warn);background:var(--warn-bg);border-color:transparent}
+.status i{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+.status.live i{background:var(--up-line);animation:pulse 2s infinite}.status.old{color:var(--warn);background:var(--warn-bg);border-color:transparent}
 .status.old i{background:var(--warn)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
 section{margin-top:26px}
@@ -838,8 +838,8 @@ document.documentElement.dataset.theme=t;}}catch(e){{}}</script>
 <body data-scanned="{e(scanned_iso)}"><main>
 <header><div><h1>Nifty150 Live Signals</h1>
 <div class="sub">SuperTrend ({ATR_PERIOD}×{MULTIPLIER:g}) + ADX DI · Nifty 100 + Midcap 50 ·
-{meta.get("checked", "—")}/{meta.get("total", "—")} stocks · last scan
-{e(fmt_stamp(scan_time, year=True) if scan_time else "—")} IST</div></div>
+{f'{meta.get("checked")}/{meta.get("total")} stocks · last scan {e(fmt_stamp(scan_time, year=True))} IST'
+ if scan_time else "waiting for the first full scan (market days, 9:15 AM – 3:30 PM IST)"}</div></div>
 <div class="hdr-r"><button class="theme" id="theme" title="Switch light / dark" aria-label="Switch light / dark">
 <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
 stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>

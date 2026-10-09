@@ -14,6 +14,10 @@ on:
         description: "Only send a Telegram test message (checks the secrets)"
         type: boolean
         default: false
+      full_scan:
+        description: "Run a full scan now, even outside market hours (refreshes the dashboard)"
+        type: boolean
+        default: false
 
 concurrency:
   group: live-signals
@@ -48,7 +52,7 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python -u nifty150_live_signals.py ${{ inputs.test_telegram && '--test-telegram' || '--once' }}
+        run: python -u nifty150_live_signals.py ${{ inputs.test_telegram && '--test-telegram' || (inputs.full_scan && '--test' || '--once') }}
 
       # The scan (or, outside market hours, the last saved state) writes
       # dashboard.html. It is published to GitHub Pages only in encrypted form
