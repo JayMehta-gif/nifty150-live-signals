@@ -4,8 +4,9 @@ Nifty150 Live Signal Notifier — SuperTrend + ADX DI/DI-
 Standalone script — copy this single file to any machine with internet
 access and Python 3.9+, install requirements, and run it. It polls
 15-min bars during NSE market hours and pops a desktop notification the
-moment either strategy's signal FIRES on any Nifty150 stock (not on every
-bar — only on the state change).
+moment either strategy's signal FIRES on any Nifty150 stock, or on the
+NIFTY 50 / NIFTY 100 indices themselves (not on every bar — only on the
+state change).
 
 Strategies (locked configs from prior backtests):
   - SuperTrend ATR(14) x 3.0                    -> BUY on trend flip -1 -> 1
@@ -25,6 +26,9 @@ Or a single scan, for a scheduler such as GitHub Actions
 (.github/workflows/live-signals.yml runs it every 15 min in market hours):
     python nifty150_live_signals.py --once
 
+Or one scan right now, ignoring market hours (for trying it out):
+    python nifty150_live_signals.py --test
+
 Notes:
   - Data source is yfinance (free, ~15-min delayed) — not for split-second
     execution, fine for swing/intraday signal alerts.
@@ -32,12 +36,11 @@ Notes:
     session, Mon-Fri. It sleeps outside those hours and wakes near open.
   - State is kept in signal_state.json next to this script, so restarting
     the script does not re-fire already-seen signals.
-  - Nifty150 list below (Nifty 100 + Nifty Midcap 50, from NSE's official
-    constituent CSVs as of 2026-10-07) is a point-in-time snapshot; NSE
-    reshuffles index constituents roughly every 6 months — update the
-    NIFTY150 list periodically from the official NSE index sheets
-    (nsearchives.nseindia.com/content/indices/ind_nifty100list.csv and
-    ind_niftymidcap50list.csv).
+  - Universe = Nifty 100 + Nifty Midcap 50, fetched from NSE's official
+    constituent CSVs at the start of every scan, so index reshuffles (about
+    every 6 months) are picked up automatically. If NSE can't be reached,
+    the built-in NIFTY150 list below (snapshot as of 2026-10-07) is used;
+    the scan log notes when the live list differs from it.
   - Popups are a custom always-on-top borderless window pinned to the
     TOP-RIGHT corner of the primary screen (tkinter, stdlib — no extra
     install needed). Requires a desktop/GUI session; if none is available
@@ -65,6 +68,10 @@ Rate-limit avoidance (yfinance / Yahoo chart API is aggressive about 429s):
   4. A global circuit breaker: if consecutive rate-limit hits cross
      CIRCUIT_BREAKER_THRESHOLD, the whole scan pauses for COOLDOWN_SECONDS
      before resuming, instead of hammering a block that won't clear.
+  5. Watchlist prioritization: stocks within WATCHLIST_PCT of their
+     SuperTrend flip line (per last cycle's close) are scanned first, so the
+     stocks most likely to fire are checked before the rest of the sweep.
+     Every stock is still scanned every cycle.
 """
 import warnings; warnings.filterwarnings("ignore")
 
@@ -94,8 +101,18 @@ except ImportError:
 
 try:
     from curl_cffi import requests as curl_requests
-    SESSION = curl_requests.Session(impersonate="chrome")
-    print("[info] using curl_cffi browser-impersonation session (rate-limit resistant)")
+
+    # libcurl drops the colon from Windows drive-letter paths that reach it via
+    # CURL_CA_BUNDLE ("C:\foo" -> "C\foo", error 77) — e.g. behind a corporate
+    # proxy. Passing the bundle to `verify=` with forward slashes avoids that.
+    ca_bundle = os.environ.get("CURL_CA_BUNDLE") or os.environ.get("REQUESTS_CA_BUNDLE")
+    if ca_bundle:
+        ca_bundle = ca_bundle.replace("\\", "/")
+        SESSION = curl_requests.Session(impersonate="chrome", verify=ca_bundle)
+        print(f"[info] using curl_cffi with explicit CA bundle: {ca_bundle}")
+    else:
+        SESSION = curl_requests.Session(impersonate="chrome")
+        print("[info] using curl_cffi browser-impersonation session (rate-limit resistant)")
 except ImportError:
     SESSION = None
     print("[warn] curl_cffi not installed — using yfinance's default session, "
@@ -128,6 +145,12 @@ RETRY_MAX = 4
 RETRY_BASE_DELAY = 5        # seconds, doubles each retry + jitter
 CIRCUIT_BREAKER_THRESHOLD = 8  # consecutive rate-limit errors across symbols
 COOLDOWN_SECONDS = 180
+
+# % distance from SuperTrend flip line to be scanned first. On 15-min bars the
+# band hugs price: at 2% ~147/150 stocks qualified (no prioritization, and the
+# tight spacing burst the whole universe); 0.5% picks the nearest ~30.
+WATCHLIST_PCT = 0.5
+WATCHLIST_DELAY = 2   # seconds between watchlist symbols (still paced, just tight)
 
 IST = ZoneInfo("Asia/Kolkata")
 STATE_FILE = Path(__file__).parent / "signal_state.json"
@@ -163,6 +186,47 @@ NIFTY150 = sorted(set([
     "ZYDUSLIFE",
 ]))
 
+# The universe is refreshed from NSE's published constituent CSVs (with
+# NIFTY150 above as the fallback), so index reshuffles are picked up without
+# editing this file. Nifty 100 and Midcap 50 don't overlap -> 150 names.
+NSE_INDEX_URLS = {
+    "Nifty100": ("https://nsearchives.nseindia.com/content/indices/ind_nifty100list.csv", 100),
+    "Midcap50": ("https://nsearchives.nseindia.com/content/indices/ind_niftymidcap50list.csv", 50),
+}
+
+# The indices themselves, scanned with the same strategies after the stocks.
+INDEX_TICKERS = {
+    "NIFTY 50": "^NSEI",
+    "NIFTY 100": "^CNX100",
+}
+
+
+def load_universe():
+    """Live Nifty 100 + Midcap 50 constituents from NSE, else the NIFTY150
+    snapshot. Each CSV must parse to roughly its expected size, so an error
+    page or a half-loaded file can't silently shrink the universe."""
+    from io import StringIO
+    try:
+        symbols = set()
+        for name, (url, expected) in NSE_INDEX_URLS.items():
+            if SESSION:
+                text = SESSION.get(url, timeout=15).text
+            else:
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                text = urllib.request.urlopen(req, timeout=15).read().decode()
+            got = set(pd.read_csv(StringIO(text))["Symbol"].str.strip())
+            if abs(len(got) - expected) > 5:
+                raise ValueError(f"{name} list has {len(got)} symbols, expected ~{expected}")
+            symbols |= got
+        added, dropped = symbols - set(NIFTY150), set(NIFTY150) - symbols
+        if added or dropped:
+            print(f"[info] NSE constituents changed vs. built-in list — "
+                  f"added {sorted(added)}, dropped {sorted(dropped)}")
+        return sorted(symbols)
+    except Exception as e:
+        print(f"[warn] live NSE constituent fetch failed ({e}); using built-in list")
+        return NIFTY150
+
 
 # ─── Indicators ────────────────────────────────────────────────────────────
 
@@ -197,7 +261,7 @@ def _supertrend(close, high, low, atr, mult):
             trend[i] = -1
         else:
             trend[i] = trend[i-1]
-    return trend
+    return trend, upper, lower
 
 
 @njit
@@ -273,12 +337,14 @@ class RateLimited(Exception):
     pass
 
 
-def fetch_15m(symbol):
-    """Fetch 15-min bars with exponential-backoff retry on rate limiting."""
+def fetch_15m(symbol, yf_ticker=None):
+    """Fetch 15-min bars with exponential-backoff retry on rate limiting.
+    `yf_ticker` overrides the "<symbol>.NS" lookup (e.g. "^NSEI" for an index)."""
+    yf_ticker = yf_ticker or f"{symbol}.NS"
     last_err = None
     for attempt in range(RETRY_MAX):
         try:
-            ticker = yf.Ticker(f"{symbol}.NS", session=SESSION) if SESSION else yf.Ticker(f"{symbol}.NS")
+            ticker = yf.Ticker(yf_ticker, session=SESSION) if SESSION else yf.Ticker(yf_ticker)
             df = ticker.history(period="10d", interval="15m")
             if df.empty:
                 return None
@@ -399,20 +465,107 @@ ONCE_PACE_SECONDS = 1.0  # --once mode: CI minutes are billed, so scan faster
 ONCE_LATEST_RUN = (16, 15)  # --once: allow late/delayed runs to catch the final bar
 
 
+INDEX_STATE_PREFIX = "__INDEX__"  # state keys for indices, kept apart from stocks
+
+
+def evaluate(name, df, prev):
+    """Run both strategies on one bar series. Returns (new_state, fired) where
+    fired lists the signals that changed since `prev` (last cycle's state)."""
+    h = df["high"].to_numpy(dtype=np.float64)
+    l = df["low"].to_numpy(dtype=np.float64)
+    c = df["close"].to_numpy(dtype=np.float64)
+    last_ts = str(df.index[-1])
+    last_close = float(c[-1])
+
+    atr = _atr_rma(h, l, c, ATR_PERIOD)
+    trend, st_upper, st_lower = _supertrend(c, h, l, atr, MULTIPLIER)
+    st_trend = int(trend[-1])
+    # how far price is from the band it must cross to flip — drives the watchlist
+    active_band = float(st_lower[-1] if st_trend == 1 else st_upper[-1])
+    distance_pct = abs(last_close - active_band) / last_close * 100.0 if last_close else None
+
+    is_open = np.array([t.hour == 9 and t.minute == 15 for t in df.index.time])
+    di_plus, di_minus, sig = _calc_di_sig(h, l, c, DI_LEN, SIG_LEN)
+    condition = _build_condition(di_plus, di_minus, sig, HL_RANGE, HL_TREND, is_open)
+    adx_cond = float(condition[-1])
+
+    fired = []
+    prev_st = prev.get("st_trend")
+    prev_adx = prev.get("adx_cond")
+    if prev_st is not None and prev_st == -1 and st_trend == 1:
+        fired.append(("SuperTrend", name, "BUY", last_close, last_ts))
+    if prev_st is not None and prev_st == 1 and st_trend == -1:
+        fired.append(("SuperTrend", name, "SELL", last_close, last_ts))
+    if prev_adx is not None and prev_adx not in (1.0, 0.5) and adx_cond in (1.0, 0.5):
+        label = "BUY_STRONG" if adx_cond == 1.0 else "BUY"
+        fired.append(("ADX_DI", name, label, last_close, last_ts))
+    if prev_adx is not None and prev_adx not in (-1.0, -0.5) and adx_cond in (-1.0, -0.5):
+        label = "SELL_STRONG" if adx_cond == -1.0 else "SELL"
+        fired.append(("ADX_DI", name, label, last_close, last_ts))
+
+    new_state = {"st_trend": st_trend, "adx_cond": adx_cond, "last_ts": last_ts,
+                 "last_close": last_close, "distance_pct": distance_pct}
+    return new_state, fired
+
+
+def build_scan_order(universe, state):
+    """Return (watchlist, rest): symbols within WATCHLIST_PCT of their last-
+    known SuperTrend flip line, nearest first, then everyone else. Symbols
+    with no prior distance (first run, or skipped last cycle) go in `rest`."""
+    watchlist, rest = [], []
+    for symbol in universe:
+        dist = state.get(symbol, {}).get("distance_pct")
+        if dist is not None and dist <= WATCHLIST_PCT:
+            watchlist.append((dist, symbol))
+        else:
+            rest.append(symbol)
+    watchlist.sort()
+    return [s for _, s in watchlist], rest
+
+
+def scan_indices(state):
+    """Same strategies on the index series themselves (NIFTY 50 / NIFTY 100)."""
+    fired = []
+    for name, yf_ticker in INDEX_TICKERS.items():
+        key = INDEX_STATE_PREFIX + name
+        try:
+            df = fetch_15m(name, yf_ticker)
+            if df is None or len(df) < 60:
+                continue
+            state[key], index_fired = evaluate(name, df, state.get(key, {}))
+            fired.extend(index_fired)
+        except Exception as e:
+            print(f"[warn] index {name}: {e}")
+    return fired
+
+
 def scan_once(per_symbol_delay=None):
     """Scan the universe with requests paced across the poll window, so the
-    150-symbol sweep never bursts — each symbol fetch is spaced ~POLL_SECONDS
-    * PACE_FRACTION / len(NIFTY150) apart (with jitter), and a circuit
-    breaker pauses the whole scan if rate limiting keeps recurring."""
+    150-symbol sweep never bursts. Symbols sitting close to a SuperTrend flip
+    (per last cycle's distance_pct) are scanned first so a live flip is picked
+    up early; the rest are spaced ~POLL_SECONDS * PACE_FRACTION / len(rest)
+    apart (with jitter). Passing per_symbol_delay (--once mode) uses that one
+    spacing for everything. A circuit breaker pauses the whole scan if rate
+    limiting keeps recurring. The indices are scanned last."""
     state = load_state()
+    universe = load_universe()
     fired = []
     checked = 0
     consecutive_rate_limits = 0
 
-    if per_symbol_delay is None:
-        per_symbol_delay = (POLL_SECONDS * PACE_FRACTION) / len(NIFTY150)
+    watchlist, rest = build_scan_order(universe, state)
+    if watchlist:
+        print(f"[watchlist] {len(watchlist)} symbol(s) near a SuperTrend flip — scanning them first")
+    scan_order = watchlist + rest
 
-    for idx, symbol in enumerate(NIFTY150):
+    if per_symbol_delay is None:
+        rest_budget = max(POLL_SECONDS * PACE_FRACTION - len(watchlist) * WATCHLIST_DELAY, 0)
+        rest_delay = rest_budget / len(rest) if rest else 0
+        watch_delay = WATCHLIST_DELAY
+    else:
+        rest_delay = watch_delay = per_symbol_delay
+
+    for idx, symbol in enumerate(scan_order):
         try:
             df = fetch_15m(symbol)
             consecutive_rate_limits = 0
@@ -420,39 +573,9 @@ def scan_once(per_symbol_delay=None):
             if df is None or len(df) < 60:
                 continue
 
-            h = df["high"].to_numpy(dtype=np.float64)
-            l = df["low"].to_numpy(dtype=np.float64)
-            c = df["close"].to_numpy(dtype=np.float64)
-            last_ts = str(df.index[-1])
-            last_close = float(c[-1])
-
-            atr = _atr_rma(h, l, c, ATR_PERIOD)
-            trend = _supertrend(c, h, l, atr, MULTIPLIER)
-            st_trend = int(trend[-1])
-
-            is_open = np.array([t.hour == 9 and t.minute == 15 for t in df.index.time])
-            di_plus, di_minus, sig = _calc_di_sig(h, l, c, DI_LEN, SIG_LEN)
-            condition = _build_condition(di_plus, di_minus, sig, HL_RANGE, HL_TREND, is_open)
-            adx_cond = float(condition[-1])
-
+            state[symbol], symbol_fired = evaluate(symbol, df, state.get(symbol, {}))
+            fired.extend(symbol_fired)
             checked += 1
-            prev = state.get(symbol, {})
-            prev_st = prev.get("st_trend")
-            prev_adx = prev.get("adx_cond")
-
-            if prev_st is not None and prev_st == -1 and st_trend == 1:
-                fired.append(("SuperTrend", symbol, "BUY", last_close, last_ts))
-            if prev_st is not None and prev_st == 1 and st_trend == -1:
-                fired.append(("SuperTrend", symbol, "SELL", last_close, last_ts))
-            if prev_adx is not None and prev_adx not in (1.0, 0.5) and adx_cond in (1.0, 0.5):
-                label = "BUY_STRONG" if adx_cond == 1.0 else "BUY"
-                fired.append(("ADX_DI", symbol, label, last_close, last_ts))
-            if prev_adx is not None and prev_adx not in (-1.0, -0.5) and adx_cond in (-1.0, -0.5):
-                label = "SELL_STRONG" if adx_cond == -1.0 else "SELL"
-                fired.append(("ADX_DI", symbol, label, last_close, last_ts))
-
-            state[symbol] = {"st_trend": st_trend, "adx_cond": adx_cond,
-                              "last_ts": last_ts, "last_close": last_close}
 
         except RateLimited:
             consecutive_rate_limits += 1
@@ -466,12 +589,15 @@ def scan_once(per_symbol_delay=None):
         except Exception as e:
             print(f"[warn] {symbol}: {e}")
 
-        if idx < len(NIFTY150) - 1:
-            time.sleep(per_symbol_delay * random.uniform(0.7, 1.3))
+        if idx < len(scan_order) - 1:
+            delay = watch_delay if idx < len(watchlist) else rest_delay
+            time.sleep(delay * random.uniform(0.7, 1.3))
+
+    fired.extend(scan_indices(state))
 
     save_state(state)
-    print(f"[{datetime.now(IST):%Y-%m-%d %H:%M:%S}] checked {checked}/{len(NIFTY150)} stocks, "
-          f"{len(fired)} new signal(s)")
+    print(f"[{datetime.now(IST):%Y-%m-%d %H:%M:%S}] checked {checked}/{len(universe)} stocks "
+          f"+ {len(INDEX_TICKERS)} indices, {len(fired)} new signal(s)")
 
     for strategy, symbol, label, price, ts in fired:
         notify(f"{strategy} {label} — {symbol}",
@@ -509,6 +635,10 @@ if __name__ == "__main__":
         if now.weekday() >= 5 or not ((9, 15) <= (now.hour, now.minute) <= ONCE_LATEST_RUN):
             print(f"[{now:%Y-%m-%d %H:%M} IST] outside market hours — skipping scan")
             sys.exit(0)
+        scan_once(float(os.environ.get("SCAN_PACE_SECONDS", ONCE_PACE_SECONDS)))
+        sys.exit(0)
+    if "--test" in sys.argv:
+        print("[--test] Ignoring market-hours gate, running one scan against latest available bars.")
         scan_once(float(os.environ.get("SCAN_PACE_SECONDS", ONCE_PACE_SECONDS)))
         sys.exit(0)
     main()
