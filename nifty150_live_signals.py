@@ -704,7 +704,7 @@ def _fmt_bars(s):
     if s.get("open"):
         return (f'<span class="bars open" title="Not flipped yet — {s["bars"]} bars (≈{dur}) so far">'
                 f'{s["bars"]}+ open</span>')
-    return (f'<span class="bars" title="Flipped after {s["bars"]} bars (≈{dur})">'
+    return (f'<span class="bars" title="Flipped after {s["bars"]} bar{"s" if s["bars"] != 1 else ""} (≈{dur})">'
             f'{s["bars"]} bar{"s" if s["bars"] != 1 else ""}</span>')
 
 
