@@ -517,10 +517,10 @@ color:var(--muted);text-align:center}
 details{margin-top:10px}summary{cursor:pointer;color:var(--accent);font-size:13px}
 details .day{font-size:12px;color:var(--muted);margin:12px 0 6px;font-weight:600}
 .list{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:var(--shadow)}
-.sig{display:grid;grid-template-columns:48px minmax(90px,150px) 110px 1fr auto;gap:10px;
+.sig{display:grid;grid-template-columns:64px minmax(90px,150px) 110px 1fr auto 72px;gap:10px;
 align-items:center;padding:9px 14px;border-bottom:1px solid var(--line)}
 .sig:last-child{border-bottom:0}.sig .t{color:var(--muted);font-size:12px}
-.sig .n{font-weight:600;overflow:hidden;text-overflow:ellipsis}.sig .pill{justify-self:start}.sig .p{text-align:right}
+.sig .n{font-weight:600;overflow:hidden;text-overflow:ellipsis}.sig .pill{justify-self:start}.sig .p,.sig .since{text-align:right}
 .sig.fresh{background:var(--hl)}
 .tools{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
 .tools input{flex:1 1 180px;padding:8px 12px;border:1px solid var(--line);border-radius:10px;
@@ -543,7 +543,7 @@ tr:last-child td{border-bottom:0}
 .foot{color:var(--muted);font-size:12px;margin-top:22px;line-height:1.6}
 @media (max-width:760px){.tiles{grid-template-columns:repeat(2,1fr)}}
 @media (max-width:600px){main{padding:14px 12px 28px}.hide-sm{display:none}
-.sig{grid-template-columns:40px 1fr auto auto}.sig .st{display:none}
+.sig{grid-template-columns:58px 1fr auto 62px;gap:8px;padding:9px 12px}.sig .st,.sig .p{display:none}
 th,td{padding:8px 9px}}
 """
 
@@ -584,6 +584,62 @@ apply();
 
 def _fmt_price(p):
     return f"{p:,.2f}" if isinstance(p, (int, float)) else "—"
+
+
+def _ist(ts):
+    """'2026-10-09 15:15:00' or a bar timestamp with +05:30 -> naive IST datetime."""
+    return datetime.fromisoformat(str(ts)[:19])
+
+
+def fmt_time(ts):
+    """12-hour IST clock time, e.g. '3:15 PM'."""
+    try:
+        return _ist(ts).strftime("%I:%M %p").lstrip("0")
+    except ValueError:
+        return str(ts)
+
+
+def fmt_day(ts):
+    """e.g. 'Fri, 9 Oct'."""
+    try:
+        d = _ist(ts)
+        return f"{d:%a}, {d.day} {d:%b}"
+    except ValueError:
+        return str(ts)
+
+
+def fmt_stamp(ts, year=False):
+    """e.g. '9 Oct, 3:15 PM' (or '9 Oct 2026, 3:15 PM')."""
+    try:
+        d = _ist(ts)
+        return f"{d.day} {d:%b}{f' {d.year}' if year else ''}, {fmt_time(ts)}"
+    except ValueError:
+        return str(ts)
+
+
+def _current_price(state, name):
+    info = state.get(name) or state.get(INDEX_STATE_PREFIX + name) or {}
+    return info.get("last_close")
+
+
+def _move_since(signal, now_px):
+    """% price move since a signal fired: (move %, in the signal's favour?)."""
+    if not now_px or not signal.get("price"):
+        return None, None
+    move = (now_px / signal["price"] - 1) * 100.0
+    return move, (move > 0 if _direction(signal["label"]) == "buy" else move < 0)
+
+
+def _since_html(signal, now_px):
+    """▲/▼ = price went up/down since the signal; green = in the signal's favour."""
+    move, favour = _move_since(signal, now_px)
+    if move is None:
+        return '<span class="flat">—</span>'
+    if abs(move) < 0.005:
+        return '<span class="chg flat">0.00%</span>'
+    return (f'<span class="chg {"up" if favour else "dn"}" title="Price '
+            f'{"up" if move > 0 else "down"} {abs(move):.2f}% since the signal">'
+            f'{"▲" if move > 0 else "▼"}{abs(move):.2f}%</span>')
 
 
 def _fmt_chg(chg):
@@ -643,13 +699,16 @@ def _confluence_card(c, state, scan_time):
     cls = "up" if c["dir"] == "buy" else "dn"
     fresh = " fresh" if c["time"] == scan_time else ""
     return (f'<div class="card {cls}{fresh}"><div class="top"><span class="name">{e(c["name"])}</span>'
-            f'<span class="pill {cls} big">BOTH {c["dir"].upper()}</span></div>'
+            f'<span class="pill {cls} big">CONFIRMED {c["dir"].upper()}</span></div>'
             f'<div class="px">{_fmt_price(info.get("last_close", c["price"]))}'
             f' <span style="font-size:13px">{_fmt_chg(info.get("day_chg_pct"))}</span></div>'
             f'<div class="row"><span>SuperTrend</span><span>{_signal_pill(c["st"]["label"])} '
-            f'{e(c["st"]["time"][11:16])} @ {_fmt_price(c["st"]["price"])}</span></div>'
+            f'{e(fmt_time(c["st"]["time"]))} @ {_fmt_price(c["st"]["price"])}</span></div>'
             f'<div class="row"><span>ADX DI</span><span>{_signal_pill(c["adx"]["label"])} '
-            f'{e(c["adx"]["time"][11:16])} @ {_fmt_price(c["adx"]["price"])}</span></div></div>')
+            f'{e(fmt_time(c["adx"]["time"]))} @ {_fmt_price(c["adx"]["price"])}</span></div>'
+            f'<div class="row"><span>Since confirmed</span>'
+            f'{_since_html({"label": c["dir"].upper(), "price": c["price"]}, info.get("last_close"))}'
+            f'</div></div>')
 
 
 def write_dashboard(state):
@@ -683,7 +742,7 @@ def write_dashboard(state):
         f'<div class="tile"><div class="k">Signals {"today" if latest_day else ""}</div>'
         f'<div class="v">{len(today)}</div><div class="s">{n_buy} buy · {len(today) - n_buy} sell</div>'
         f'{bar(n_buy, len(today) - n_buy)}</div>'
-        f'<div class="tile"><div class="k">Both agree</div><div class="v">{len(conf_today)}</div>'
+        f'<div class="tile"><div class="k">Confirmed</div><div class="v">{len(conf_today)}</div>'
         f'<div class="s">{sum(c["dir"] == "buy" for c in conf_today)} buy · '
         f'{sum(c["dir"] == "sell" for c in conf_today)} sell</div></div>'
         f'<div class="tile"><div class="k">SuperTrend</div><div class="v">{st_long}<span class="s"> / '
@@ -713,21 +772,23 @@ def write_dashboard(state):
         conf_html = '<div class="cards wide">' + "".join(
             _confluence_card(c, state, scan_time) for c in conf_today) + "</div>"
     else:
-        conf_html = ('<div class="empty">No stock has fired the same direction on both '
-                     f'strategies {"on " + e(latest_day) if latest_day else "yet"}.</div>')
+        conf_html = ('<div class="empty">No stock has had a buy or sell confirmed by both '
+                     f'strategies {"on " + e(fmt_day(latest_day)) if latest_day else "yet"}.</div>')
     earlier = [(d, cs) for d, cs in confluence.items() if d != latest_day]
     if earlier:
         conf_html += (f'<details><summary>Earlier days ({sum(len(cs) for _, cs in earlier)})</summary>'
-                      + "".join(f'<div class="day">{e(d)}</div><div class="cards wide">'
+                      + "".join(f'<div class="day">{e(fmt_day(d))}</div><div class="cards wide">'
                                 + "".join(_confluence_card(c, state, scan_time) for c in cs)
                                 + "</div>" for d, cs in earlier) + "</details>")
 
     # signal timeline
     sig_rows = "".join(
         f'<div class="sig{" fresh" if s["time"] == scan_time else ""}" data-dir="{_direction(s["label"])}">'
-        f'<span class="t">{e(s["time"][11:16])}</span><span class="n">{e(s["name"])}</span>'
+        f'<span class="t">{e(fmt_time(s["time"]))}</span><span class="n">{e(s["name"])}</span>'
         f'{_signal_pill(s["label"])}<span class="flat st">{e(s["strategy"])}</span>'
-        f'<span class="p">{_fmt_price(s["price"])}</span></div>' for s in today)
+        f'<span class="p">{_fmt_price(s["price"])}</span>'
+        f'<span class="since">{_since_html(s, _current_price(state, s["name"]))}</span></div>'
+        for s in today)
 
     # stock table, nearest-to-flip first
     def nearest_first(sym):
@@ -735,20 +796,30 @@ def write_dashboard(state):
         return (dist is None, dist or 0.0)
 
     fresh = {s["name"] for s in log if s["time"] == scan_time}
+    last_signal = {s["name"]: s for s in log}  # log is oldest-first -> keeps the latest
     trs = []
     for sym in sorted(stocks, key=nearest_first):
         info = stocks[sym]
         st, adx = info.get("st_trend"), info.get("adx_cond") or 0.0
         dist, chg = info.get("distance_pct"), info.get("day_chg_pct")
+        sig = last_signal.get(sym)
+        move, favour = _move_since(sig, info.get("last_close")) if sig else (None, None)
+        # sort key: % move in the signal's favour (negative = going against it)
+        since_key = abs(move) * (1 if favour else -1) if move is not None else -999
+        last_html = (f'{_signal_pill(sig["label"])} {_since_html(sig, info.get("last_close"))}'
+                     f'<div class="flat" style="font-size:11px">{e(fmt_stamp(sig["time"]))}</div>'
+                     if sig else '<span class="flat">—</span>')
         trs.append(
             f'<tr{" class=fresh" if sym in fresh else ""} data-sym="{e(sym)}" data-st="{st}" '
             f'data-adx="{adx}" data-dist="{dist if dist is not None else 999}" '
-            f'data-chg="{chg if chg is not None else 0}" data-px="{info.get("last_close") or 0}">'
+            f'data-chg="{chg if chg is not None else 0}" data-px="{info.get("last_close") or 0}" '
+            f'data-since="{since_key}">'
             f'<td><b>{e(sym)}</b></td><td class="num">{_fmt_chg(chg)}</td>'
             f'<td>{_st_pill(st)}</td><td>{_adx_pill(adx)}</td>'
             f'<td class="num">{_fmt_price(info.get("last_close"))}</td>'
             f'<td class="num">{f"{dist:.2f}%" if dist is not None else "—"}</td>'
-            f'<td class="hide-sm flat">{e(str(info.get("last_ts", ""))[5:16])}</td></tr>')
+            f'<td>{last_html}</td>'
+            f'<td class="hide-sm flat">{e(fmt_stamp(info.get("last_ts", "")))}</td></tr>')
 
     scanned_iso = f"{scan_time.replace(' ', 'T')}+05:30" if scan_time else ""
     page = f"""<!doctype html>
@@ -762,7 +833,8 @@ document.documentElement.dataset.theme=t;}}catch(e){{}}</script>
 <body data-scanned="{e(scanned_iso)}"><main>
 <header><div><h1>Nifty150 Live Signals</h1>
 <div class="sub">SuperTrend ({ATR_PERIOD}×{MULTIPLIER:g}) + ADX DI · Nifty 100 + Midcap 50 ·
-{meta.get("checked", "—")}/{meta.get("total", "—")} stocks · last scan {e(scan_time or "—")} IST</div></div>
+{meta.get("checked", "—")}/{meta.get("total", "—")} stocks · last scan
+{e(fmt_stamp(scan_time, year=True) if scan_time else "—")} IST</div></div>
 <div class="hdr-r"><button class="theme" id="theme" title="Switch light / dark" aria-label="Switch light / dark">
 <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
 stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
@@ -771,28 +843,31 @@ stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
 M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button>
 <span class="status" id="status"><i></i> Waiting for first scan</span></div></header>
 <div class="tiles">{tiles}</div>
-<section><h2>Both strategies agree <span class="count">{e(latest_day or "")}</span></h2>
-<p class="hint">SuperTrend and ADX DI both fired the same direction on the same day
-(latest signal of each counts).</p>{conf_html}</section>
+<section><h2>Double confirmation <span class="count">{e(fmt_day(latest_day) if latest_day else "")}</span></h2>
+<p class="hint">SuperTrend and ADX DI both gave the same signal — buy or sell — on the same day
+(the latest signal of each counts).</p>{conf_html}</section>
 <section><h2>Indices</h2>
 <div class="cards">{"".join(cards) or '<div class="empty">No index data yet.</div>'}</div></section>
-<section id="signals"><h2>Signals <span class="count">{e(latest_day or "")}</span></h2>
+<section id="signals"><h2>Signals <span class="count">{e(fmt_day(latest_day) if latest_day else "")}</span></h2>
 <div class="tools" data-group="sig"><button class="chip on" data-f="all">All</button>
 <button class="chip" data-f="buy">Buy</button><button class="chip" data-f="sell">Sell</button></div>
 <div class="list">{sig_rows or '<div class="empty" style="border:0">No signals yet.</div>'}</div></section>
 <section><h2>All stocks <span class="count" id="shown"></span></h2>
 <div class="tools" data-group="tbl"><input id="q" placeholder="Search symbol…" autocomplete="off">
-<button class="chip on" data-f="all">All</button><button class="chip" data-f="both">Both agree now</button>
-<button class="chip" data-f="near">Near flip</button>
-<button class="chip" data-f="long">ST long</button><button class="chip" data-f="short">ST short</button>
+<button class="chip on" data-f="all">All</button>
+<button class="chip" data-f="both" title="SuperTrend and ADX DI point the same way right now">Trend aligned</button>
+<button class="chip" data-f="near" title="Within {WATCHLIST_PCT:g}% of a SuperTrend flip">Near flip</button>
+<button class="chip" data-f="long">SuperTrend long</button><button class="chip" data-f="short">SuperTrend short</button>
 <button class="chip" data-f="abuy">ADX buy</button><button class="chip" data-f="asell">ADX sell</button></div>
 <div class="tw"><table id="stocks"><thead><tr>
 <th data-k="sym">Stock</th><th class="num" data-k="chg">Chg</th><th data-k="st">SuperTrend</th>
 <th data-k="adx">ADX DI</th><th class="num" data-k="px">Price</th>
-<th class="num sorted" data-k="dist">To flip</th><th class="hide-sm">Bar (IST)</th></tr></thead>
+<th class="num sorted" data-k="dist">To flip</th><th data-k="since">Last signal</th>
+<th class="hide-sm">Last bar</th></tr></thead>
 <tbody>{"".join(trs)}</tbody></table></div></section>
-<div class="foot">Highlighted = fired in the latest scan. "To flip" = distance from price to the
-SuperTrend band it must cross. Data: Yahoo Finance, ~15 min delayed; page refreshes every 5 min.
+<div class="foot">Highlighted = fired in the latest scan. ▲/▼ = price up/down since the signal fired;
+green when that move is in the signal's favour, red when against it. "To flip" = distance from price to
+the SuperTrend band it must cross. All times IST. Data: Yahoo Finance, ~15 min delayed; page refreshes every 5 min.
 SELL signals were not part of the backtests. Not investment advice.</div>
 </main><script>const NEAR={WATCHLIST_PCT};{DASHBOARD_JS}</script></body></html>"""
     DASHBOARD_FILE.write_text(page, encoding="utf-8")
@@ -975,7 +1050,7 @@ def scan_once(per_symbol_delay=None):
 
     for strategy, symbol, label, price, ts in fired:
         notify(f"{strategy} {label} — {symbol}",
-               f"{symbol} @ {price:.2f}  ({strategy}, bar {ts})")
+               f"{symbol} @ {price:.2f}  ({strategy}, bar {fmt_stamp(ts)} IST)")
 
 
 def main():
