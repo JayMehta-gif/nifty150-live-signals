@@ -470,10 +470,13 @@ header{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:fle
 h1{font-size:20px;margin:0;letter-spacing:-.01em}
 .sub{color:var(--muted);font-size:12px}
 .hdr-r{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
-.theme{display:inline-flex;padding:2px;border:1px solid var(--line);border-radius:999px;background:var(--card)}
-.theme button{border:0;background:none;color:var(--muted);font:inherit;font-size:12px;
-padding:4px 10px;border-radius:999px;cursor:pointer}
-.theme button[aria-pressed="true"]{background:var(--fg);color:var(--bg)}
+.theme{display:inline-grid;place-items:center;width:32px;height:32px;padding:0;
+border:1px solid var(--line);border-radius:50%;background:var(--card);color:var(--fg);cursor:pointer}
+.theme:hover{border-color:var(--muted)}.theme svg{width:16px;height:16px}
+.theme .sun{display:none}
+:root[data-theme="dark"] .theme .sun{display:block}:root[data-theme="dark"] .theme .moon{display:none}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .theme .sun{display:block}
+:root:not([data-theme="light"]) .theme .moon{display:none}}
 .status{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;
 font-size:12px;font-weight:600;background:var(--card);border:1px solid var(--line)}
 .status i{width:8px;height:8px;border-radius:50%;background:var(--up-line)}
@@ -545,13 +548,9 @@ th,td{padding:8px 9px}}
 """
 
 DASHBOARD_JS = """
-const tbs=[...document.querySelectorAll('.theme button')];
-function setTheme(t){if(t==='auto')delete document.documentElement.dataset.theme;
- else document.documentElement.dataset.theme=t;
- tbs.forEach(b=>b.setAttribute('aria-pressed',b.dataset.t===t));
- try{t==='auto'?localStorage.removeItem('theme'):localStorage.setItem('theme',t);}catch(e){}}
-let cur='auto';try{cur=localStorage.getItem('theme')||'auto';}catch(e){}
-setTheme(cur);tbs.forEach(b=>b.onclick=()=>setTheme(b.dataset.t));
+document.getElementById('theme').onclick=()=>{const r=document.documentElement;
+ const dark=r.dataset.theme?r.dataset.theme==='dark':matchMedia('(prefers-color-scheme: dark)').matches;
+ r.dataset.theme=dark?'light':'dark';try{localStorage.setItem('theme',r.dataset.theme);}catch(e){}};
 const scanned=new Date(document.body.dataset.scanned),st=document.getElementById('status');
 const ageMin=(Date.now()-scanned)/60000;
 if(!isNaN(ageMin)){if(ageMin<=25){st.classList.add('live');st.lastChild.textContent=' Live · updated '+
@@ -764,8 +763,12 @@ document.documentElement.dataset.theme=t;}}catch(e){{}}</script>
 <header><div><h1>Nifty150 Live Signals</h1>
 <div class="sub">SuperTrend ({ATR_PERIOD}×{MULTIPLIER:g}) + ADX DI · Nifty 100 + Midcap 50 ·
 {meta.get("checked", "—")}/{meta.get("total", "—")} stocks · last scan {e(scan_time or "—")} IST</div></div>
-<div class="hdr-r"><div class="theme" role="group" aria-label="Theme">
-<button data-t="auto">Auto</button><button data-t="light">Light</button><button data-t="dark">Dark</button></div>
+<div class="hdr-r"><button class="theme" id="theme" title="Switch light / dark" aria-label="Switch light / dark">
+<svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+<svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2
+M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button>
 <span class="status" id="status"><i></i> Waiting for first scan</span></div></header>
 <div class="tiles">{tiles}</div>
 <section><h2>Both strategies agree <span class="count">{e(latest_day or "")}</span></h2>
