@@ -566,7 +566,7 @@ DASHBOARD_CSS = """
 *{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 Inter,-apple-system,BlinkMacSystemFont,
 "Segoe UI",Roboto,sans-serif;font-feature-settings:"tnum" 1,"cv11" 1;-webkit-font-smoothing:antialiased}
-.wrap{max-width:1180px;margin:0 auto;padding:0 20px}
+.wrap{max-width:1680px;margin:0 auto;padding:0 clamp(14px,2vw,32px)}
 /* top bar */
 .top{position:sticky;top:0;z-index:5;background:color-mix(in srgb,var(--bg) 88%,transparent);
 backdrop-filter:saturate(1.4) blur(10px);border-bottom:1px solid var(--line)}
@@ -603,6 +603,7 @@ section{margin-bottom:26px}
 .sh{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin:0 0 10px;flex-wrap:wrap}
 .sh h2{font-size:15px;margin:0;letter-spacing:-.01em}.sh .meta{font-size:12px;color:var(--muted)}
 .note{font-size:12px;color:var(--muted);margin:-4px 0 12px;max-width:820px}
+.note.below{margin:14px 0 0;max-width:1100px;line-height:1.6}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow)}
 /* index strip */
 .idx{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:22px}
@@ -716,19 +717,21 @@ const mvOf=r=>{const px=r[7]?PX[r[1]]:r[5];if(!px||!r[4])return null;const m=(px
    [time, name, label, strategy, price, exit, move, bars, open, confirmed, max gain, max drawdown] */
 const PAST=ARCH.filter(r=>r[3]<2&&PDAYS.has(r[0].slice(0,10))).reverse().map(r=>[r[0],NAMES[r[1]],r[2],SN[r[3]],r[4],
  r[7]?null:r[5],mvOf(r),r[6],r[7],CONF.has(r[0].slice(0,10)+'|'+r[1])?1:0,r[8],r[9]]);
-const PT=$('#t-past tbody'),pf={day:'',dir:'all',strat:'all',conf:false,q:''};let pk='t',pa=false;
+const PT=$('#t-past tbody'),pf={day:'',dir:'all',strat:'all',conf:false,sym:''};let pk='t',pa=false;
 const esc=x=>String(x).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const fp=v=>v==null?'—':v.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
 const tg=l=>'<span class="tag '+(l.includes('SELL')?'dn':'up')+'">'+l.replace('_',' ')+'</span>';
 const pc=v=>v==null?'<span class="fa">—</span>':Math.abs(v)<0.005?'<span class="mu">0.00%</span>':
  '<span class="'+(v>0?'up':'dn')+'">'+(v>0?'+':'')+v.toFixed(2)+'%</span>';
 const t12=t=>{let[h,m]=t.slice(11,16).split(':').map(Number);const ap=h>=12?'PM':'AM';return(h%12||12)+':'+String(m).padStart(2,'0')+' '+ap};
+const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const dshort=t=>+t.slice(8,10)+' '+MON[+t.slice(5,7)-1];
 const bt=(b,o)=>b==null?'—':o?(b===0?'<span class="tag ok">new</span>':'<span class="mu">'+b+'+</span>'):b;
 function renderPast(){const rows=PAST.filter(r=>r[0].startsWith(pf.day)&&(pf.dir==='all'||(pf.dir==='sell')===r[2].includes('SELL'))
- &&(pf.strat==='all'||r[3]===pf.strat)&&(!pf.conf||r[9])&&r[1].includes(pf.q));
+ &&(pf.strat==='all'||r[3]===pf.strat)&&(!pf.conf||r[9])&&(!pf.sym||r[1]===pf.sym));
  const i={t:0,sym:1,mv:6,bars:7,mfe:10,mae:11}[pk];rows.sort((a,b)=>{const x=a[i],y=b[i];
   const v=typeof x==='string'?x.localeCompare(y):(x??-999)-(y??-999);return pa?v:-v});
- PT.innerHTML=rows.map(r=>'<tr><td class="mu">'+t12(r[0])+'</td><td class="sym">'+esc(r[1])+(r[9]?' <span class="tag ok">✓</span>':'')+
+ PT.innerHTML=rows.map(r=>'<tr><td class="mu">'+(pf.day?'':dshort(r[0])+', ')+t12(r[0])+'</td><td class="sym">'+esc(r[1])+(r[9]?' <span class="tag ok">✓</span>':'')+
   '</td><td>'+tg(r[2])+'</td><td class="mu hide-md">'+(r[3]==='SuperTrend'?'SuperTrend':'ADX DI')+'</td><td class="r hide-sm">'+fp(r[4])+
   '</td><td class="r hide-md">'+(r[8]?'<span class="fa">open</span>':fp(r[5]))+'</td><td class="r">'+pc(r[6])+'</td><td class="r">'+pc(r[10])+'</td><td class="r hide-sm">'+pc(r[11])+
   '</td><td class="r">'+bt(r[7],r[8])+'</td></tr>').join('')
@@ -740,7 +743,7 @@ const daySel=$('#f-past-day');
 daySel.onchange=()=>{pf.day=daySel.value;$$('.daysum').forEach(x=>x.style.display=x.dataset.day===pf.day?'':'none');renderPast()};
 seg($('#f-past-dir'),v=>{pf.dir=v;renderPast()});seg($('#f-past-strat'),v=>{pf.strat=v;renderPast()});
 $('#f-past-conf').onchange=e=>{pf.conf=e.target.checked;renderPast()};
-$('#f-past-q').oninput=e=>{pf.q=e.target.value.trim().toUpperCase();renderPast()};
+$('#f-past-sym').onchange=e=>{pf.sym=e.target.value;renderPast()};
 daySel.onchange();
 /* accuracy: overall or for one stock / index */
 const med=a=>{if(!a.length)return null;const s=[...a].sort((x,y)=>x-y),m=s.length>>1;return s.length%2?s[m]:(s[m-1]+s[m])/2};
@@ -748,8 +751,6 @@ function stats(rows){const c=[],o=[],b=[],g=[],d=[];for(const r of rows){const m
  if(r[7])o.push(m);else{c.push(m);if(r[6]!=null)b.push(r[6]);if(r[8]!=null){g.push(r[8]);d.push(r[9])}}}
  return{n:rows.length,closed:c.length,open:o.length,win:c.length?c.filter(x=>x>0).length/c.length*100:null,bars:med(b),
   move:med(c),avg:c.length?c.reduce((x,y)=>x+y,0)/c.length:null,open_move:med(o),mfe:med(g),mae:med(d)}}
-const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-const dshort=t=>+t.slice(8,10)+' '+MON[+t.slice(5,7)-1];
 const kpi=(k,v,s)=>'<div class="panel kpi"><div class="k">'+k+'</div><div class="v">'+v+'</div><div class="s">'+s+'</div></div>';
 const big=v=>v==null?'—':Math.abs(v)<0.005?'<span class="mu">0.00%</span>':'<span class="'+(v>0?'up':'dn')+'">'+(v>0?'+':'')+v.toFixed(2)+'%</span>';
 const num=(v,d=0,suf='')=>v==null?'—':v.toFixed(d)+suf;
@@ -1062,6 +1063,19 @@ def write_dashboard(state):
                + ";const PDAYS=new Set(" + json.dumps(past_days) + ");").replace("</", "<\\/")
     per_day = {d: sum(1 for h in past if h["time"][:10] == d) for d in past_days}
     day_opts = "".join(f'<option value="{d}">{e(fmt_day(d))} · {per_day[d]} signals</option>' for d in past_days)
+    if past_days:
+        day_opts += f'<option value="">All {len(past_days)} days · {len(past)} signals</option>'
+    past_counts = {}
+    for h in past:
+        past_counts[h["name"]] = past_counts.get(h["name"], 0) + 1
+
+    def sym_options(cnt, all_label):
+        ix = "".join(f'<option value="{e(n)}">{e(n)} · {cnt[n]}</option>' for n in INDEX_TICKERS if n in cnt)
+        st = "".join(f'<option value="{e(n)}">{e(n)} · {cnt[n]}</option>' for n in sorted(cnt) if n not in INDEX_TICKERS)
+        return (f'<option value="">{all_label} · {sum(cnt.values())}</option>'
+                + (f'<optgroup label="Indices">{ix}</optgroup>' if ix else "")
+                + (f'<optgroup label="Stocks">{st}</optgroup>' if st else ""))
+    past_sym_opts = sym_options(past_counts, "All stocks &amp; indices")
     day_sums = []
     for d in past_days:
         ds = [h for h in past if h["time"][:10] == d]
@@ -1168,26 +1182,23 @@ stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
 
 <div class="view" id="v-past">
 <div class="sh"><h2>Past signals</h2><span class="meta" id="c-past"></span></div>
-<p class="note">Every signal from the last {HISTORY_DAYS} sessions, replayed bar by bar from 15-minute data — pick a day
-below. Time = the 15-min candle the signal formed on (labelled by its start, like TradingView);
-<b>Move</b> = price change in the signal's favour up to its flip (or to now if still open); <b>Bars</b> = 15-min bars until
-that strategy flipped (SuperTrend reversed / ADX left that side). ✓ = part of a double confirmation that day.</p>
 <div class="tb"><select class="sel" id="f-past-day" aria-label="Day">{day_opts or '<option value="">No data yet</option>'}</select>
 <div class="seg" id="f-past-dir"><button class="on" data-f="all">All</button><button data-f="buy">Buy</button><button data-f="sell">Sell</button></div>
 <div class="seg" id="f-past-strat"><button class="on" data-f="all">Both</button><button data-f="SuperTrend">SuperTrend</button><button data-f="ADX_DI">ADX DI</button></div>
 <label class="chk"><input type="checkbox" id="f-past-conf"> Confirmed only</label>
-<input type="search" id="f-past-q" placeholder="Search stock…" autocomplete="off"></div>
+<select class="sel" id="f-past-sym" aria-label="Stock or index">{past_sym_opts}</select></div>
 {"".join(day_sums)}
 {table("t-past", '<th class="sorted desc" data-k="t" data-asc="0">Time</th><th data-k="sym" data-asc="1">Stock</th><th>Signal</th><th class="hide-md">Strategy</th><th class="r hide-sm">Price</th><th class="r hide-md">Exit</th><th class="r" data-k="mv" data-asc="0">Move</th><th class="r" data-k="mfe" data-asc="0">Max gain</th><th class="r hide-sm" data-k="mae" data-asc="1">Max drawdown</th><th class="r" data-k="bars" data-asc="1">Bars</th>',
        "", "No signals match these filters.")}
+<p class="note below">Every signal from the last {HISTORY_DAYS} sessions, replayed bar by bar from 15-minute data. Time = the
+15-min candle the signal formed on (labelled by its start, like TradingView); <b>Move</b> = price change in the signal's favour
+up to its flip (or to now if still open); <b>Max gain</b> / <b>Max drawdown</b> = furthest price went in the signal's favour /
+against it before the flip; <b>Bars</b> = 15-min bars until that strategy flipped (SuperTrend reversed / ADX left that side).
+✓ = part of a double confirmation that day.</p>
 </div>
 
 <div class="view" id="v-accuracy">
 <div class="sh"><h2>Accuracy tracker</h2><span class="meta" id="acc-span">{e(span)}</span></div>
-<p class="note">A signal <b>wins</b> if price moved in its favour (up after a buy, down after a sell) by the bar where that
-strategy flipped. <b>Median bars</b> = 15-min bars until the flip; <b>Median move</b> = typical % move in the signal's favour at
-the flip; <b>Max gain</b> / <b>Max drawdown</b> = the furthest price went in the signal's favour / against it
-(candle highs and lows) before the flip. Open signals aren't scored — their current move is shown separately. Builds up to {ARCHIVE_KEEP_DAYS} days of history.</p>
 <div class="tb"><select class="sel" id="f-acc-sym" aria-label="Stock or index">{sym_opts}</select>
 <span class="mu" id="acc-what" style="font-size:12px"></span></div>
 <div class="kpis" id="acc-kpis"></div>
@@ -1201,6 +1212,10 @@ the flip; <b>Max gain</b> / <b>Max drawdown</b> = the furthest price went in the
 <div class="panel tw"><table><thead><tr><th>When</th><th>Signal</th><th class="hide-sm">Strategy</th>
 <th class="r hide-sm">Price</th><th class="r hide-md">Exit</th><th class="r">Move</th><th class="r">Max gain</th>
 <th class="r hide-sm">Max drawdown</th><th class="r">Bars</th></tr></thead><tbody id="acc-log"></tbody></table></div></section>
+<p class="note below">A signal <b>wins</b> if price moved in its favour (up after a buy, down after a sell) by the bar where that
+strategy flipped. <b>Median bars</b> = 15-min bars until the flip; <b>Median move</b> = typical % move in the signal's favour at
+the flip; <b>Max gain</b> / <b>Max drawdown</b> = the furthest price went in the signal's favour / against it
+(candle highs and lows) before the flip. Open signals aren't scored — their current move is shown separately. Builds up to {ARCHIVE_KEEP_DAYS} days of history.</p>
 </div>
 
 <div class="view" id="v-stocks">
