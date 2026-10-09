@@ -707,8 +707,15 @@ function filterer(tbodySel,countSel){const rows=$$(tbodySel+' tr[data-sym]'),f={
 const VIEWS={all:()=>true,aligned:d=>(d.st==='1'&&+d.adx>0)||(d.st==='-1'&&+d.adx<0),near:d=>+d.dist<=NEAR,
  long:d=>d.st==='1',short:d=>d.st==='-1',abuy:d=>+d.adx>0,asell:d=>+d.adx<0};
 const live=filterer('#t-live tbody');seg($('#f-live-dir'),v=>live.set('dir',v));
-/* past signals: rows come from PAST (compact JSON) and are drawn per selected day.
+/* shared archive (ARCH/NAMES/PX/PDAYS come from the data script).
+   ARCH row: [time, name#, label, strategy 0 ST/1 ADX/2 CONFIRMED, price, exit, bars, open, max gain, max drawdown] */
+const SN=['SuperTrend','ADX_DI','CONFIRMED'];
+const CONF=new Set(ARCH.filter(r=>r[3]===2).map(r=>r[0].slice(0,10)+'|'+r[1]));
+const mvOf=r=>{const px=r[7]?PX[r[1]]:r[5];if(!px||!r[4])return null;const m=(px/r[4]-1)*100;return r[2].includes('SELL')?-m:m};
+/* past signals, drawn per selected day:
    [time, name, label, strategy, price, exit, move, bars, open, confirmed, max gain, max drawdown] */
+const PAST=ARCH.filter(r=>r[3]<2&&PDAYS.has(r[0].slice(0,10))).reverse().map(r=>[r[0],NAMES[r[1]],r[2],SN[r[3]],r[4],
+ r[7]?null:r[5],mvOf(r),r[6],r[7],CONF.has(r[0].slice(0,10)+'|'+r[1])?1:0,r[8],r[9]]);
 const PT=$('#t-past tbody'),pf={day:'',dir:'all',strat:'all',conf:false,q:''};let pk='t',pa=false;
 const esc=x=>String(x).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const fp=v=>v==null?'—':v.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -735,6 +742,50 @@ seg($('#f-past-dir'),v=>{pf.dir=v;renderPast()});seg($('#f-past-strat'),v=>{pf.s
 $('#f-past-conf').onchange=e=>{pf.conf=e.target.checked;renderPast()};
 $('#f-past-q').oninput=e=>{pf.q=e.target.value.trim().toUpperCase();renderPast()};
 daySel.onchange();
+/* accuracy: overall or for one stock / index */
+const med=a=>{if(!a.length)return null;const s=[...a].sort((x,y)=>x-y),m=s.length>>1;return s.length%2?s[m]:(s[m-1]+s[m])/2};
+function stats(rows){const c=[],o=[],b=[],g=[],d=[];for(const r of rows){const m=mvOf(r);if(m==null)continue;
+ if(r[7])o.push(m);else{c.push(m);if(r[6]!=null)b.push(r[6]);if(r[8]!=null){g.push(r[8]);d.push(r[9])}}}
+ return{n:rows.length,closed:c.length,open:o.length,win:c.length?c.filter(x=>x>0).length/c.length*100:null,bars:med(b),
+  move:med(c),avg:c.length?c.reduce((x,y)=>x+y,0)/c.length:null,open_move:med(o),mfe:med(g),mae:med(d)}}
+const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const dshort=t=>+t.slice(8,10)+' '+MON[+t.slice(5,7)-1];
+const kpi=(k,v,s)=>'<div class="panel kpi"><div class="k">'+k+'</div><div class="v">'+v+'</div><div class="s">'+s+'</div></div>';
+const big=v=>v==null?'—':Math.abs(v)<0.005?'<span class="mu">0.00%</span>':'<span class="'+(v>0?'up':'dn')+'">'+(v>0?'+':'')+v.toFixed(2)+'%</span>';
+const num=(v,d=0,suf='')=>v==null?'—':v.toFixed(d)+suf;
+function accRow(tag,rows){const a=stats(rows);
+ const win=a.win==null?'<span class="fa">—</span>':'<div class="wr"><span style="min-width:38px">'+a.win.toFixed(0)+
+  '%</span><span class="tr"><b class="'+(a.win<50?'lo':'')+'" style="width:'+a.win.toFixed(0)+'%"></b></span></div>';
+ return '<tr><td>'+tg(tag)+'</td><td class="r">'+a.n+'</td><td class="r hide-sm">'+a.closed+'</td><td>'+win+'</td><td class="r">'+
+  num(a.bars)+'</td><td class="r">'+pc(a.move)+'</td><td class="r">'+pc(a.mfe)+'</td><td class="r">'+pc(a.mae)+
+  '</td><td class="r hide-sm">'+pc(a.avg)+'</td><td class="r hide-sm">'+a.open+' · '+pc(a.open_move)+'</td></tr>'}
+function renderAcc(sym){const ni=sym?NAMES.indexOf(sym):-1;const rows=sym?ARCH.filter(r=>r[1]===ni):ARCH;
+ const sig=rows.filter(r=>r[3]<2),cf=rows.filter(r=>r[3]===2),all=stats(sig),con=stats(cf);
+ const days=[...new Set(sig.map(r=>r[0].slice(0,10)))].sort();
+ $('#acc-span').textContent=days.length?dshort(days[0])+' – '+dshort(days[days.length-1])+' · '+days.length+' sessions':'no signals';
+ $('#acc-what').textContent=sym?'Accuracy for '+sym+' only':'All '+NAMES.length+' stocks & indices';
+ $('#acc-kpis').innerHTML=kpi('Signals tracked',all.n,all.closed+' closed · '+all.open+' open')+
+  kpi('Win rate (closed)',num(all.win,0,'%'),'moved in the signal’s favour by its flip')+
+  kpi('Median bars to flip',num(all.bars),'≈ '+(all.bars==null?'—':(all.bars*15/60).toFixed(1)+' h')+' of trading')+
+  kpi('Confirmed setups win rate',num(con.win,0,'%'),con.closed+' closed · median '+pc(con.move));
+ $('#acc-k3').innerHTML=[['Median move at flip','move','where price was when the strategy flipped'],
+  ['Median max gain','mfe','furthest in the signal’s favour before the flip'],
+  ['Median max drawdown','mae','furthest against the signal before the flip']].map(([t,k,h])=>kpi(t,big(all[k]),h+' · confirmed '+pc(con[k]))).join('');
+ const st=sig.filter(r=>r[3]===0),ad=sig.filter(r=>r[3]===1),L=(a,l)=>a.filter(r=>r[2]===l),grp=t=>'<tr class="grp"><td colspan="10">'+t+'</td></tr>';
+ $('#acc-body').innerHTML=grp('SuperTrend')+accRow('BUY',L(st,'BUY'))+accRow('SELL',L(st,'SELL'))+accRow('ALL',st)+
+  grp('ADX DI')+accRow('BUY',L(ad,'BUY'))+accRow('BUY_STRONG',L(ad,'BUY_STRONG'))+accRow('SELL',L(ad,'SELL'))+
+  accRow('SELL_STRONG',L(ad,'SELL_STRONG'))+accRow('ALL',ad)+grp('Double confirmation (enter on 2nd signal, exit on 1st flip)')+
+  accRow('CONFIRMED BUY',L(cf,'BUY'))+accRow('CONFIRMED SELL',L(cf,'SELL'));
+ const w=$('#acc-log-wrap');w.style.display=sym?'':'none';if(!sym)return;
+ const log=[...rows].reverse();$('#acc-log-title').textContent=sym+' — every signal';$('#acc-log-count').textContent=log.length+' signals';
+ $('#acc-log').innerHTML=log.map(r=>'<tr><td class="mu">'+dshort(r[0])+', '+t12(r[0])+'</td><td>'+tg(r[3]===2?'CONFIRMED '+r[2]:r[2])+
+  '</td><td class="mu hide-sm">'+(r[3]===0?'SuperTrend':r[3]===1?'ADX DI':'Both')+'</td><td class="r hide-sm">'+fp(r[4])+
+  '</td><td class="r hide-md">'+(r[7]?'<span class="fa">open</span>':fp(r[5]))+'</td><td class="r">'+pc(mvOf(r))+'</td><td class="r">'+
+  pc(r[8])+'</td><td class="r hide-sm">'+pc(r[9])+'</td><td class="r">'+bt(r[6],r[7])+'</td></tr>').join('')||
+  '<tr><td colspan="9" class="empty">No signals for this one yet.</td></tr>'}
+const accSel=$('#f-acc-sym');accSel.onchange=()=>{renderAcc(accSel.value);try{localStorage.setItem('accsym',accSel.value)}catch(e){}};
+try{const v=localStorage.getItem('accsym');if(v&&[...accSel.options].some(o=>o.value===v))accSel.value=v}catch(e){}
+renderAcc(accSel.value);
 const stk=filterer('#t-stocks tbody','#c-stocks');seg($('#f-stk-view'),v=>stk.set('view',v));
 $('#f-stk-q').oninput=e=>stk.set('q',e.target.value.trim().toUpperCase());stk.run();
 /* sortable tables */
@@ -994,17 +1045,21 @@ def write_dashboard(state):
     past = sorted((h for h in strategy_signals(archive) if h["time"][:10] in past_days),
                   key=lambda h: h["time"], reverse=True)
     conf_keys = {(h["time"][:10], h["name"]) for h in confirmed_trades(archive)}
-    # rows go to the page as compact JSON and are drawn in the browser one day
-    # at a time — 10 days of HTML rows would make the (encrypted) page ~1.5 MB
-    past_data = []
-    for h in past:
-        mv, closed = outcome(h, _current_price(state, h["name"]))
-        past_data.append([h["time"], h["name"], h["label"], h["strategy"], round(h["price"], 2),
-                          round(h["exit_price"], 2) if closed and h.get("exit_price") else None,
-                          round(mv, 3) if mv is not None else None, h.get("bars"),
-                          0 if closed else 1, int((h["time"][:10], h["name"]) in conf_keys),
-                          h.get("mfe"), h.get("mae")])
-    past_json = json.dumps(past_data, separators=(",", ":")).replace("</", "<\\/")
+    # The whole archive goes to the page once as compact JSON; Past signals and
+    # Accuracy (overall or per stock/index) are drawn from it in the browser.
+    # Row: [time, name#, label, strategy (0 ST / 1 ADX / 2 CONFIRMED), price,
+    #       exit price, bars, open, max gain, max drawdown]
+    strat_code = {"SuperTrend": 0, "ADX_DI": 1, "CONFIRMED": 2}
+    names = sorted({h["name"] for h in archive})
+    name_ix = {n: i for i, n in enumerate(names)}
+    arch_rows = [[h["time"], name_ix[h["name"]], h["label"], strat_code[h["strategy"]], round(h["price"], 2),
+                  round(h["exit_price"], 2) if h.get("exit_price") else None, h.get("bars"),
+                  1 if h.get("open", True) else 0, h.get("mfe"), h.get("mae")]
+                 for h in sorted(archive, key=lambda x: x["time"])]
+    prices = {name_ix[n]: _current_price(state, n) for n in names}
+    data_js = ("const NAMES=" + json.dumps(names) + ";const ARCH=" + json.dumps(arch_rows, separators=(",", ":"))
+               + ";const PX=" + json.dumps(prices, separators=(",", ":"))
+               + ";const PDAYS=new Set(" + json.dumps(past_days) + ");").replace("</", "<\\/")
     per_day = {d: sum(1 for h in past if h["time"][:10] == d) for d in past_days}
     day_opts = "".join(f'<option value="{d}">{e(fmt_day(d))} · {per_day[d]} signals</option>' for d in past_days)
     day_sums = []
@@ -1024,68 +1079,18 @@ def write_dashboard(state):
                          f"max drawdown <b class=dn>{acc['mae']:+.2f}%</b></span>")
         day_sums.append(f'<div class="daysum" data-day="{d}">{"".join(parts)}</div>')
 
-    # ── accuracy (whole archive)
-    groups = [
-        ("SuperTrend", [("BUY", "SuperTrend", ("BUY",)), ("SELL", "SuperTrend", ("SELL",))]),
-        ("ADX DI", [("BUY", "ADX_DI", ("BUY",)), ("BUY STRONG", "ADX_DI", ("BUY_STRONG",)),
-                    ("SELL", "ADX_DI", ("SELL",)), ("SELL STRONG", "ADX_DI", ("SELL_STRONG",))]),
-    ]
-    trades = confirmed_trades(archive)
-
-    def acc_row(label, sigs, tag_label):
-        a = accuracy_stats(sigs, state)
-        win = (f'<div class="wr"><span style="min-width:38px">{a["win"]:.0f}%</span><span class="tr">'
-               f'<b class="{"lo" if a["win"] < 50 else ""}" style="width:{a["win"]:.0f}%"></b></span></div>'
-               if a["win"] is not None else '<span class="fa">—</span>')
-        bars = f"{a['bars']:.0f}" if a["bars"] is not None else "—"
-        return (f'<tr><td>{_tag(tag_label)} <span class="mu">{e(label)}</span></td><td class="r">{a["n"]}</td>'
-                f'<td class="r hide-sm">{a["closed"]}</td><td>{win}</td>'
-                f'<td class="r">{bars}</td>'
-                f'<td class="r">{_pct(a["move"])}</td><td class="r">{_pct(a["mfe"])}</td>'
-                f'<td class="r">{_pct(a["mae"])}</td><td class="r hide-sm">{_pct(a["avg"])}</td>'
-                f'<td class="r hide-sm">{a["open"]} · {_pct(a["open_move"])}</td></tr>')
-
-    acc_rows = []
-    for title, rows in groups:
-        acc_rows.append(f'<tr class="grp"><td colspan="10">{e(title)}</td></tr>')
-        for lbl, strat, labels in rows:
-            acc_rows.append(acc_row("", [h for h in archive if h["strategy"] == strat and h["label"] in labels], lbl))
-        acc_rows.append(acc_row("", [h for h in archive if h["strategy"] == (
-            "SuperTrend" if title == "SuperTrend" else "ADX_DI")], "ALL"))
-    acc_rows.append('<tr class="grp"><td colspan="10">Double confirmation (enter on 2nd signal, exit on 1st flip)</td></tr>')
-    acc_rows.append(acc_row("", [t for t in trades if t["label"] == "BUY"], "CONFIRMED BUY"))
-    acc_rows.append(acc_row("", [t for t in trades if t["label"] == "SELL"], "CONFIRMED SELL"))
-    overall = accuracy_stats(strategy_signals(archive), state)
-    conf_all = accuracy_stats(trades, state)
+    # ── accuracy: symbol picker (stats themselves are computed in the browser)
     span = (f"{fmt_day(days_all[-1])} – {fmt_day(days_all[0])} · {len(days_all)} sessions"
             if days_all else "no data yet")
-    fmt_n = lambda v, f, suffix="": f"{v:{f}}{suffix}" if v is not None else "—"  # noqa: E731
-    acc_kpis = (
-        f'<div class="panel kpi"><div class="k">Signals tracked</div><div class="v">{overall["n"]}</div>'
-        f'<div class="s">{overall["closed"]} closed · {overall["open"]} open</div></div>'
-        f'<div class="panel kpi"><div class="k">Win rate (closed)</div><div class="v">'
-        f'{fmt_n(overall["win"], ".0f", "%")}</div>'
-        f'<div class="s">moved in the signal\'s favour by its flip</div></div>'
-        f'<div class="panel kpi"><div class="k">Median bars to flip</div><div class="v">'
-        f'{fmt_n(overall["bars"], ".0f")}</div>'
-        f'<div class="s">≈ {fmt_n(overall["bars"] * 15 / 60 if overall["bars"] is not None else None, ".1f", " h")} of trading</div></div>'
-        f'<div class="panel kpi"><div class="k">Confirmed setups win rate</div><div class="v">'
-        f'{fmt_n(conf_all["win"], ".0f", "%")}</div>'
-        f'<div class="s">{conf_all["closed"]} closed · median {_pct(conf_all["move"])}</div></div>')
-
-    def big_pct(v):
-        if v is None:
-            return "—"
-        cls = "up" if v > 0.005 else ("dn" if v < -0.005 else "mu")
-        return f'<span class="{cls}">{v:+.2f}%</span>'
-
-    move_kpis = "".join(
-        f'<div class="panel kpi"><div class="k">{title}</div><div class="v">{big_pct(overall[key])}</div>'
-        f'<div class="s">{hint} · confirmed {_pct(conf_all[key])}</div></div>'
-        for title, key, hint in (
-            ("Median move at flip", "move", "where price was when the strategy flipped"),
-            ("Median max gain", "mfe", "furthest in the signal's favour before the flip"),
-            ("Median max drawdown", "mae", "furthest against the signal before the flip")))
+    counts = {}
+    for h in strategy_signals(archive):
+        counts[h["name"]] = counts.get(h["name"], 0) + 1
+    idx_opts = "".join(f'<option value="{e(n)}">{e(n)} · {counts[n]}</option>' for n in INDEX_TICKERS if n in counts)
+    stk_opts = "".join(f'<option value="{e(n)}">{e(n)} · {counts[n]}</option>'
+                       for n in sorted(counts) if n not in INDEX_TICKERS)
+    sym_opts = (f'<option value="">All stocks &amp; indices · {sum(counts.values())}</option>'
+                + (f'<optgroup label="Indices">{idx_opts}</optgroup>' if idx_opts else "")
+                + (f'<optgroup label="Stocks">{stk_opts}</optgroup>' if stk_opts else ""))
 
     # ── stocks
     last_sig = {}
@@ -1175,21 +1180,27 @@ that strategy flipped (SuperTrend reversed / ADX left that side). ✓ = part of 
 {"".join(day_sums)}
 {table("t-past", '<th class="sorted desc" data-k="t" data-asc="0">Time</th><th data-k="sym" data-asc="1">Stock</th><th>Signal</th><th class="hide-md">Strategy</th><th class="r hide-sm">Price</th><th class="r hide-md">Exit</th><th class="r" data-k="mv" data-asc="0">Move</th><th class="r" data-k="mfe" data-asc="0">Max gain</th><th class="r hide-sm" data-k="mae" data-asc="1">Max drawdown</th><th class="r" data-k="bars" data-asc="1">Bars</th>',
        "", "No signals match these filters.")}
-<script>const PAST={past_json};</script>
 </div>
 
 <div class="view" id="v-accuracy">
-<div class="sh"><h2>Accuracy tracker</h2><span class="meta">{e(span)}</span></div>
+<div class="sh"><h2>Accuracy tracker</h2><span class="meta" id="acc-span">{e(span)}</span></div>
 <p class="note">A signal <b>wins</b> if price moved in its favour (up after a buy, down after a sell) by the bar where that
 strategy flipped. <b>Median bars</b> = 15-min bars until the flip; <b>Median move</b> = typical % move in the signal's favour at
 the flip; <b>Max gain</b> / <b>Max drawdown</b> = the furthest price went in the signal's favour / against it
 (candle highs and lows) before the flip. Open signals aren't scored — their current move is shown separately. Builds up to {ARCHIVE_KEEP_DAYS} days of history.</p>
-<div class="kpis">{acc_kpis}</div>
-<div class="kpis k3">{move_kpis}</div>
+<div class="tb"><select class="sel" id="f-acc-sym" aria-label="Stock or index">{sym_opts}</select>
+<span class="mu" id="acc-what" style="font-size:12px"></span></div>
+<div class="kpis" id="acc-kpis"></div>
+<div class="kpis k3" id="acc-k3"></div>
 <div class="panel tw"><table><thead><tr><th>Signal</th><th class="r">Signals</th><th class="r hide-sm">Closed</th>
 <th>Win rate</th><th class="r">Median bars</th><th class="r">Median move</th><th class="r">Median max gain</th>
 <th class="r">Median max drawdown</th><th class="r hide-sm">Avg move</th>
-<th class="r hide-sm">Open · now</th></tr></thead><tbody>{"".join(acc_rows)}</tbody></table></div>
+<th class="r hide-sm">Open · now</th></tr></thead><tbody id="acc-body"></tbody></table></div>
+<section id="acc-log-wrap" style="display:none;margin-top:26px"><div class="sh"><h2 id="acc-log-title">Signals</h2>
+<span class="meta" id="acc-log-count"></span></div>
+<div class="panel tw"><table><thead><tr><th>When</th><th>Signal</th><th class="hide-sm">Strategy</th>
+<th class="r hide-sm">Price</th><th class="r hide-md">Exit</th><th class="r">Move</th><th class="r">Max gain</th>
+<th class="r hide-sm">Max drawdown</th><th class="r">Bars</th></tr></thead><tbody id="acc-log"></tbody></table></div></section>
 </div>
 
 <div class="view" id="v-stocks">
@@ -1205,6 +1216,7 @@ the flip; <b>Max gain</b> / <b>Max drawdown</b> = the furthest price went in the
 <div class="foot">All times IST. Data: Yahoo Finance (~15 min delayed); this page refreshes every 5 minutes.
 SELL signals and the accuracy figures are not from the original backtests. Not investment advice.</div>
 </main>
+<script>{data_js}</script>
 <script>const NEAR={WATCHLIST_PCT};{DASHBOARD_JS}</script></body></html>"""
     DASHBOARD_FILE.write_text(page, encoding="utf-8")
 
