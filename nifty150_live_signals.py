@@ -563,6 +563,7 @@ overflow:hidden;text-overflow:ellipsis}
 .ix .tags{display:flex;gap:4px;margin-top:7px}
 /* kpis */
 .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:26px}
+.kpis.k3{grid-template-columns:repeat(3,1fr);margin-top:-16px}
 .kpi{padding:13px 15px}.kpi .k{font-size:12px;color:var(--muted);font-weight:500}
 .kpi .v{font-size:24px;font-weight:700;letter-spacing:-.02em;margin:2px 0}
 .kpi .s{font-size:12px;color:var(--muted)}
@@ -617,6 +618,7 @@ letter-spacing:.04em;padding:7px 12px}
 @media (max-width:700px){.wrap{padding:0 14px}.brand .sub{display:none}
 .idx{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;margin:0 -14px 20px;padding:0 14px 4px}
 .idx .ix{flex:0 0 46%;scroll-snap-align:start}.kpis{grid-template-columns:repeat(2,1fr)}
+.kpis.k3{grid-template-columns:1fr}
 .hide-sm{display:none}td,th{padding:8px 9px}.status .lbl{display:none}.status{padding:0 9px}}
 """.replace("DARK", """--bg:#000;--panel:#000;--fg:#f1f5f9;--muted:#8a94a6;--faint:#5b6577;--line:#1c1f26;
 --head:#07080a;--hover:#0d0f13;--up:#34d399;--up-bg:#04170f;--up-bd:#0b3a26;--dn:#f87171;--dn-bg:#1c0607;
@@ -1015,11 +1017,24 @@ def write_dashboard(state):
         f'<div class="s">moved in the signal\'s favour by its flip</div></div>'
         f'<div class="panel kpi"><div class="k">Median bars to flip</div><div class="v">'
         f'{fmt_n(overall["bars"], ".0f")}</div>'
-        f'<div class="s">≈ {fmt_n(overall["bars"] * 15 / 60 if overall["bars"] is not None else None, ".1f", " h")} of trading · '
-        f'max gain {_pct(overall["mfe"])} · drawdown {_pct(overall["mae"])}</div></div>'
+        f'<div class="s">≈ {fmt_n(overall["bars"] * 15 / 60 if overall["bars"] is not None else None, ".1f", " h")} of trading</div></div>'
         f'<div class="panel kpi"><div class="k">Confirmed setups win rate</div><div class="v">'
         f'{fmt_n(conf_all["win"], ".0f", "%")}</div>'
         f'<div class="s">{conf_all["closed"]} closed · median {_pct(conf_all["move"])}</div></div>')
+
+    def big_pct(v):
+        if v is None:
+            return "—"
+        cls = "up" if v > 0.005 else ("dn" if v < -0.005 else "mu")
+        return f'<span class="{cls}">{v:+.2f}%</span>'
+
+    move_kpis = "".join(
+        f'<div class="panel kpi"><div class="k">{title}</div><div class="v">{big_pct(overall[key])}</div>'
+        f'<div class="s">{hint} · confirmed {_pct(conf_all[key])}</div></div>'
+        for title, key, hint in (
+            ("Median move at flip", "move", "where price was when the strategy flipped"),
+            ("Median max gain", "mfe", "furthest in the signal's favour before the flip"),
+            ("Median max drawdown", "mae", "furthest against the signal before the flip")))
 
     # ── stocks
     last_sig = {}
@@ -1119,6 +1134,7 @@ strategy flipped. <b>Median bars</b> = 15-min bars until the flip; <b>Median mov
 the flip; <b>Max gain</b> / <b>Max drawdown</b> = the furthest price went in the signal's favour / against it
 (candle highs and lows) before the flip. Open signals aren't scored — their current move is shown separately. Builds up to {ARCHIVE_KEEP_DAYS} days of history.</p>
 <div class="kpis">{acc_kpis}</div>
+<div class="kpis k3">{move_kpis}</div>
 <div class="panel tw"><table><thead><tr><th>Signal</th><th class="r">Signals</th><th class="r hide-sm">Closed</th>
 <th>Win rate</th><th class="r">Median bars</th><th class="r">Median move</th><th class="r">Median max gain</th>
 <th class="r">Median max drawdown</th><th class="r hide-sm">Avg move</th>
