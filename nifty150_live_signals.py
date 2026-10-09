@@ -5,7 +5,7 @@ Standalone script — copy this single file to any machine with internet
 access and Python 3.9+, install requirements, and run it. It polls
 15-min bars during NSE market hours and pops a desktop notification the
 moment either strategy's signal FIRES on any Nifty150 stock, or on the
-NIFTY 50 / NIFTY 100 / BANK NIFTY indices themselves (not on every bar — only on the
+NIFTY 50 / BANK NIFTY / NEXT 50 / MIDCAP 150 / SMALLCAP 250 / NIFTY 500 indices (not on every bar — only on the
 state change).
 
 Strategies (locked configs from prior backtests):
@@ -198,8 +198,11 @@ NSE_INDEX_URLS = {
 # The indices themselves, scanned with the same strategies after the stocks.
 INDEX_TICKERS = {
     "NIFTY 50": "^NSEI",
-    "NIFTY 100": "^CNX100",
     "BANK NIFTY": "^NSEBANK",
+    "NIFTY NEXT 50": "^NSMIDCP",
+    "NIFTY MIDCAP 150": "NIFTYMIDCAP150.NS",
+    "NIFTY SMALLCAP 250": "NIFTYSMLCAP250.NS",
+    "NIFTY 500": "^CRSLDX",
 }
 
 
@@ -449,159 +452,176 @@ def notify(title, message):
 # ─── Dashboard ──────────────────────────────────────────────────────────────
 
 DASHBOARD_FILE = Path(__file__).parent / "dashboard.html"
-SIGNAL_LOG_KEY = "__SIGNALS__"   # recent fired signals, kept in the state file
+SIGNAL_LOG_KEY = "__SIGNALS__"   # live fired signals, kept in the state file
 SIGNAL_LOG_MAX = 300
 SCAN_META_KEY = "__SCAN__"       # last scan time / coverage
 ADX_LABELS = {1.0: "BUY_STRONG", 0.5: "BUY", 0.0: "—", -0.5: "SELL", -1.0: "SELL_STRONG"}
-CONFLUENCE_DAYS = 5              # trading days of "both strategies agree" history shown
+SESSION_BARS = 25                # 15-min bars per NSE session (9:15–3:30)
 
 DASHBOARD_CSS = """
-:root{--bg:#f4f5f7;--card:#fff;--fg:#111827;--muted:#6b7280;--line:#e5e7eb;--soft:#f9fafb;--hover:#f3f4f6;
---up:#047857;--up-bg:#d1fae5;--up-line:#10b981;--dn:#b91c1c;--dn-bg:#fee2e2;--dn-line:#ef4444;
---hl:#fef9c3;--accent:#2563eb;--warn:#92400e;--warn-bg:#fef3c7;--shadow:0 1px 2px rgba(0,0,0,.05)}
-@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--bg:#000;--card:#000;--fg:#f3f4f6;--muted:#8b919a;--line:#1f2125;--soft:#000;--hover:#0e0e10;
---up:#34d399;--up-bg:#062b1d;--up-line:#10b981;--dn:#f87171;--dn-bg:#2f0b0d;--dn-line:#ef4444;
---hl:#1f1b06;--accent:#60a5fa;--warn:#fcd34d;--warn-bg:#241c04;--shadow:none}}
-:root[data-theme="dark"]{color-scheme:dark;--bg:#000;--card:#000;--fg:#f3f4f6;--muted:#8b919a;--line:#1f2125;--soft:#000;--hover:#0e0e10;
---up:#34d399;--up-bg:#062b1d;--up-line:#10b981;--dn:#f87171;--dn-bg:#2f0b0d;--dn-line:#ef4444;
---hl:#1f1b06;--accent:#60a5fa;--warn:#fcd34d;--warn-bg:#241c04;--shadow:none}
+:root{--bg:#f5f6f8;--panel:#fff;--fg:#0f172a;--muted:#64748b;--faint:#94a3b8;--line:#e2e8f0;
+--head:#f8fafc;--hover:#f1f5f9;--up:#059669;--up-bg:#ecfdf5;--up-bd:#a7f3d0;--dn:#dc2626;--dn-bg:#fef2f2;
+--dn-bd:#fecaca;--accent:#4f46e5;--accent-bg:#eef2ff;--hl:#fffbeb;--warn:#b45309;--warn-bg:#fffbeb;
+--shadow:0 1px 2px rgba(15,23,42,.04),0 1px 3px rgba(15,23,42,.06)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;DARK}}
+:root[data-theme="dark"]{color-scheme:dark;DARK}
 :root[data-theme="light"]{color-scheme:light}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);
-font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
-font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
-main{max-width:1080px;margin:0 auto;padding:20px 16px 32px}
-header{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-end;gap:10px}
-h1{font-size:20px;margin:0;letter-spacing:-.01em}
-.sub{color:var(--muted);font-size:12px}
-.hdr-r{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
-.theme{display:inline-grid;place-items:center;width:32px;height:32px;padding:0;
-border:1px solid var(--line);border-radius:50%;background:var(--card);color:var(--fg);cursor:pointer}
-.theme:hover{border-color:var(--muted)}.theme svg{width:16px;height:16px}
-.theme .sun{display:none}
-:root[data-theme="dark"] .theme .sun{display:block}:root[data-theme="dark"] .theme .moon{display:none}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 Inter,-apple-system,BlinkMacSystemFont,
+"Segoe UI",Roboto,sans-serif;font-feature-settings:"tnum" 1,"cv11" 1;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px}
+/* top bar */
+.top{position:sticky;top:0;z-index:5;background:color-mix(in srgb,var(--bg) 88%,transparent);
+backdrop-filter:saturate(1.4) blur(10px);border-bottom:1px solid var(--line)}
+.bar1{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 0 10px}
+.brand{display:flex;align-items:center;gap:10px;min-width:0}
+.logo{width:30px;height:30px;border-radius:8px;background:var(--fg);color:var(--bg);display:grid;
+place-items:center;font-weight:800;font-size:13px;letter-spacing:-.02em;flex:none}
+.brand h1{font-size:16px;margin:0;letter-spacing:-.01em;white-space:nowrap}
+.brand .sub{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tools-r{display:flex;align-items:center;gap:8px;flex:none}
+.status{display:inline-flex;align-items:center;gap:7px;height:30px;padding:0 11px;border-radius:999px;
+font-size:12px;font-weight:600;border:1px solid var(--line);background:var(--panel);white-space:nowrap}
+.status i{width:7px;height:7px;border-radius:50%;background:var(--faint)}
+.status.live i{background:var(--up);box-shadow:0 0 0 3px color-mix(in srgb,var(--up) 25%,transparent);
+animation:pulse 2s infinite}
+.status.old{color:var(--warn);background:var(--warn-bg);border-color:transparent}.status.old i{background:var(--warn)}
+@keyframes pulse{50%{opacity:.4}}
+.iconbtn{width:30px;height:30px;display:grid;place-items:center;border-radius:8px;border:1px solid var(--line);
+background:var(--panel);color:var(--fg);cursor:pointer;padding:0}.iconbtn svg{width:15px;height:15px}
+.theme .sun{display:none}:root[data-theme="dark"] .theme .sun{display:block}
+:root[data-theme="dark"] .theme .moon{display:none}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .theme .sun{display:block}
 :root:not([data-theme="light"]) .theme .moon{display:none}}
-.status{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;
-font-size:12px;font-weight:600;background:var(--card);border:1px solid var(--line)}
-.status i{width:8px;height:8px;border-radius:50%;background:var(--muted)}
-.status.live i{background:var(--up-line);animation:pulse 2s infinite}.status.old{color:var(--warn);background:var(--warn-bg);border-color:transparent}
-.status.old i{background:var(--warn)}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
-section{margin-top:26px}
-h2{display:flex;align-items:center;gap:8px;font-size:15px;margin:0 0 10px}
-h2 .count{font-size:12px;color:var(--muted);font-weight:500}
-.hint{color:var(--muted);font-size:12px;margin:-6px 0 10px}
-.tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:16px}
-.tile{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;box-shadow:var(--shadow)}
-.tile .k{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
-.tile .v{font-size:24px;font-weight:700;margin:2px 0}
-.tile .s{font-size:12px;color:var(--muted)}
-.bar{display:flex;height:6px;border-radius:3px;overflow:hidden;background:var(--line);margin-top:8px}
-.bar .u{background:var(--up-line)}.bar .d{background:var(--dn-line)}
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}
-.card{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--line);
-border-radius:12px;padding:12px 14px;box-shadow:var(--shadow)}
-.card.up{border-left-color:var(--up-line)}.card.dn{border-left-color:var(--dn-line)}
-.card .top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
-.card .name{font-weight:700;font-size:15px}
-.card .px{font-size:22px;font-weight:700;margin:2px 0 6px}
-.card .row{display:flex;justify-content:space-between;align-items:center;font-size:12px;
-color:var(--muted);padding:3px 0}
-.card .row>span:first-child{white-space:nowrap}.card .row>span:last-child{text-align:right}
-.cards.wide{grid-template-columns:repeat(auto-fill,minmax(290px,1fr))}
-.card.fresh{background:linear-gradient(var(--hl),var(--hl)) padding-box}
-.pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;
-letter-spacing:.02em;white-space:nowrap}
-.pill.up{color:var(--up);background:var(--up-bg)}.pill.dn{color:var(--dn);background:var(--dn-bg)}
-.pill.big{font-size:12px;padding:3px 10px}
-.flat{color:var(--muted)}
-.chg.up{color:var(--up)}.chg.dn{color:var(--dn)}
-.empty{background:var(--card);border:1px dashed var(--line);border-radius:12px;padding:16px;
-color:var(--muted);text-align:center}
-details{margin-top:10px}summary{cursor:pointer;color:var(--accent);font-size:13px}
-details .day{font-size:12px;color:var(--muted);margin:12px 0 6px;font-weight:600}
-.list{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:var(--shadow)}
-.sig{display:grid;grid-template-columns:64px minmax(90px,150px) 110px 1fr auto 72px;gap:10px;
-align-items:center;padding:9px 14px;border-bottom:1px solid var(--line)}
-.sig:last-child{border-bottom:0}.sig .t{color:var(--muted);font-size:12px}
-.sig .n{font-weight:600;overflow:hidden;text-overflow:ellipsis}.sig .pill{justify-self:start}.sig .p,.sig .since{text-align:right}
-.sig.fresh{background:var(--hl)}
-.sig.h{grid-template-columns:64px minmax(90px,150px) 110px 1fr auto 72px 64px}
-.bars{text-align:right;font-size:12px;color:var(--muted);white-space:nowrap}
-.bars.open{color:var(--accent)}
-.tools{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
-.tools input{flex:1 1 180px;padding:8px 12px;border:1px solid var(--line);border-radius:10px;
-background:var(--card);color:var(--fg);font:inherit}
-.tools input:focus{outline:2px solid var(--accent);outline-offset:-1px}
-.chip{padding:6px 12px;border:1px solid var(--line);border-radius:999px;background:var(--card);
-color:var(--fg);font:inherit;font-size:12px;cursor:pointer}
-.chip.on{background:var(--fg);color:var(--bg);border-color:var(--fg)}
-.tw{overflow:auto;max-height:70vh;background:var(--card);border:1px solid var(--line);
-border-radius:12px;box-shadow:var(--shadow)}
-table{border-collapse:collapse;width:100%}
-th,td{padding:8px 12px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
-th{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);cursor:pointer;
-user-select:none;position:sticky;top:0;background:var(--soft);z-index:1}
-th[data-k]:hover{color:var(--fg)}th.sorted::after{content:" ↑"}th.sorted.desc::after{content:" ↓"}
-.num{text-align:right}
-tbody tr:hover td{background:var(--hover)}
+.tabs{display:flex;gap:4px;overflow-x:auto;scrollbar-width:none;margin-bottom:-1px}
+.tabs::-webkit-scrollbar{display:none}
+.tab{appearance:none;border:0;background:none;color:var(--muted);font:inherit;font-weight:600;font-size:13px;
+padding:9px 12px 11px;border-bottom:2px solid transparent;cursor:pointer;white-space:nowrap}
+.tab:hover{color:var(--fg)}.tab.on{color:var(--fg);border-bottom-color:var(--fg)}
+.tab .n{margin-left:6px;font-size:11px;font-weight:600;color:var(--muted);background:var(--hover);
+padding:1px 6px;border-radius:999px}
+/* layout */
+main{padding:20px 0 40px}.view{display:none}.view.on{display:block}
+section{margin-bottom:26px}
+.sh{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin:0 0 10px;flex-wrap:wrap}
+.sh h2{font-size:15px;margin:0;letter-spacing:-.01em}.sh .meta{font-size:12px;color:var(--muted)}
+.note{font-size:12px;color:var(--muted);margin:-4px 0 12px;max-width:820px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow)}
+/* index strip */
+.idx{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:22px}
+.ix{padding:11px 13px;min-width:0}
+.ix .nm{font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.03em;white-space:nowrap;
+overflow:hidden;text-overflow:ellipsis}
+.ix .px{font-size:17px;font-weight:700;letter-spacing:-.01em;margin:3px 0 1px}
+.ix .ft{display:flex;align-items:center;justify-content:space-between;gap:6px;font-size:12px}
+.ix .tags{display:flex;gap:4px;margin-top:7px}
+/* kpis */
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:26px}
+.kpi{padding:13px 15px}.kpi .k{font-size:12px;color:var(--muted);font-weight:500}
+.kpi .v{font-size:24px;font-weight:700;letter-spacing:-.02em;margin:2px 0}
+.kpi .s{font-size:12px;color:var(--muted)}
+.split{display:flex;height:4px;border-radius:2px;overflow:hidden;background:var(--line);margin-top:9px}
+.split b{background:var(--up)}.split i{background:var(--dn)}
+/* tags */
+.tag{display:inline-flex;align-items:center;height:20px;padding:0 7px;border-radius:5px;font-size:11px;
+font-weight:700;letter-spacing:.02em;white-space:nowrap;border:1px solid transparent}
+.tag.up{color:var(--up);background:var(--up-bg);border-color:var(--up-bd)}
+.tag.dn{color:var(--dn);background:var(--dn-bg);border-color:var(--dn-bd)}
+.tag.mute{color:var(--muted);background:var(--hover)}
+.tag.ok{color:var(--accent);background:var(--accent-bg)}
+.up{color:var(--up)}.dn{color:var(--dn)}.mu{color:var(--muted)}.fa{color:var(--faint)}
+/* toolbars */
+.tb{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
+.seg{display:inline-flex;padding:2px;border:1px solid var(--line);border-radius:9px;background:var(--panel)}
+.seg button{appearance:none;border:0;background:none;color:var(--muted);font:inherit;font-size:12px;
+font-weight:600;padding:5px 10px;border-radius:7px;cursor:pointer;white-space:nowrap}
+.seg button.on{background:var(--fg);color:var(--bg)}
+.tb input[type=search]{flex:1 1 180px;min-width:140px;height:32px;padding:0 11px;border:1px solid var(--line);
+border-radius:9px;background:var(--panel);color:var(--fg);font:inherit;font-size:13px}
+.tb input:focus{outline:2px solid var(--accent);outline-offset:-1px}
+.chk{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--muted);
+cursor:pointer;user-select:none}.chk input{accent-color:var(--accent)}
+.daysum{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12px;color:var(--muted);margin:2px 0 10px}
+.daysum b{color:var(--fg);font-weight:600}
+/* tables */
+.tw{overflow:auto;max-height:72vh;border-radius:12px}
+table{border-collapse:separate;border-spacing:0;width:100%;font-size:13px}
+th{position:sticky;top:0;z-index:1;background:var(--head);color:var(--muted);font-size:11px;font-weight:600;
+text-transform:uppercase;letter-spacing:.04em;text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);
+white-space:nowrap;cursor:default;user-select:none}
+th[data-k]{cursor:pointer}th[data-k]:hover{color:var(--fg)}
+th.sorted::after{content:" ↑"}th.sorted.desc::after{content:" ↓"}
+td{padding:9px 12px;border-bottom:1px solid var(--line);white-space:nowrap;vertical-align:middle}
+tbody tr:last-child td{border-bottom:0}tbody tr:hover td{background:var(--hover)}
 tr.fresh td{background:var(--hl)}
-tr:last-child td{border-bottom:0}
-.hday{margin:0 0 10px}
-.hday summary{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 12px;list-style:none;cursor:pointer;
-padding:10px 14px;background:var(--card);border:1px solid var(--line);border-radius:12px;color:var(--fg)}
-.hday summary::-webkit-details-marker{display:none}
-.hday summary::before{content:"▸";color:var(--muted)}.hday[open] summary::before{content:"▾"}
-.hday summary .flat{font-size:12px}
-.hday[open] summary{border-radius:12px 12px 0 0;border-bottom:0}
-.hday .list{border-radius:0 0 12px 12px;max-height:520px;overflow:auto}
-.confline{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:8px 14px;font-size:12px;
-background:var(--card);border:1px solid var(--line);border-bottom:0}
-.foot{color:var(--muted);font-size:12px;margin-top:22px;line-height:1.6}
-@media (max-width:760px){.tiles{grid-template-columns:repeat(2,1fr)}}
-@media (max-width:600px){main{padding:14px 12px 28px}.hide-sm{display:none}
-.sig{grid-template-columns:58px 1fr auto 62px;gap:8px;padding:9px 12px}.sig .st,.sig .p{display:none}
-.sig.h{grid-template-columns:52px 1fr auto 58px 50px;gap:6px}
-th,td{padding:8px 9px}}
-"""
+.r{text-align:right}.sym{font-weight:600}.sm{font-size:11px;color:var(--faint)}
+.empty{padding:28px 16px;text-align:center;color:var(--muted);font-size:13px}
+/* accuracy */
+.wr{display:flex;align-items:center;gap:8px;min-width:120px}
+.wr .tr{flex:1;height:6px;border-radius:3px;background:var(--line);overflow:hidden;min-width:50px}
+.wr .tr b{display:block;height:100%;background:var(--up)}.wr .tr b.lo{background:var(--dn)}
+tr.grp td{background:var(--head);font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;
+letter-spacing:.04em;padding:7px 12px}
+.foot{font-size:12px;color:var(--faint);padding:14px 0 0;border-top:1px solid var(--line);line-height:1.6}
+@media (max-width:980px){.idx{grid-template-columns:repeat(3,1fr)}}
+@media (max-width:700px){.wrap{padding:0 14px}.brand .sub{display:none}
+.idx{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;margin:0 -14px 20px;padding:0 14px 4px}
+.idx .ix{flex:0 0 46%;scroll-snap-align:start}.kpis{grid-template-columns:repeat(2,1fr)}
+.hide-sm{display:none}td,th{padding:8px 9px}.status .lbl{display:none}.status{padding:0 9px}}
+""".replace("DARK", """--bg:#000;--panel:#000;--fg:#f1f5f9;--muted:#8a94a6;--faint:#5b6577;--line:#1c1f26;
+--head:#07080a;--hover:#0d0f13;--up:#34d399;--up-bg:#04170f;--up-bd:#0b3a26;--dn:#f87171;--dn-bg:#1c0607;
+--dn-bd:#4a1416;--accent:#818cf8;--accent-bg:#0e0f24;--hl:#141005;--warn:#fbbf24;--warn-bg:#191204;--shadow:none""")
 
 DASHBOARD_JS = """
-document.getElementById('theme').onclick=()=>{const r=document.documentElement;
+const $=(s,r=document)=>r.querySelector(s),$$=(s,r=document)=>[...r.querySelectorAll(s)];
+/* theme */
+$('#theme').onclick=()=>{const r=document.documentElement;
  const dark=r.dataset.theme?r.dataset.theme==='dark':matchMedia('(prefers-color-scheme: dark)').matches;
- r.dataset.theme=dark?'light':'dark';try{localStorage.setItem('theme',r.dataset.theme);}catch(e){}};
-const scanned=new Date(document.body.dataset.scanned),st=document.getElementById('status');
-const ageMin=(Date.now()-scanned)/60000;
-if(!isNaN(ageMin)){if(ageMin<=25){st.classList.add('live');st.lastChild.textContent=' Live · updated '+
- (ageMin<1?'just now':Math.round(ageMin)+' min ago');}
- else{st.classList.add('old');st.lastChild.textContent=' Last scan '+(ageMin<120?Math.round(ageMin)+
- ' min':ageMin<2880?Math.round(ageMin/60)+' h':Math.round(ageMin/1440)+' days')+' ago';
- st.title='Normal outside market hours (Mon–Fri 09:15–15:30 IST); otherwise a scheduled run may be late.';}}
-function chips(group,fn){const cs=[...document.querySelectorAll('[data-group='+group+'] .chip')];
- cs.forEach(c=>c.onclick=()=>{cs.forEach(x=>x.classList.remove('on'));c.classList.add('on');fn(c.dataset.f);});}
-const sigs=[...document.querySelectorAll('#signals .sig')];
-chips('sig',f=>sigs.forEach(r=>r.style.display=(f==='all'||r.dataset.dir===f)?'':'none'));
-const hs=[...document.querySelectorAll('#history .sig')];
-chips('hist',f=>hs.forEach(r=>r.style.display=(f==='all'||r.dataset.dir===f)?'':'none'));
-const rows=[...document.querySelectorAll('#stocks tbody tr')];let filter='all',query='';
-function apply(){let n=0;for(const r of rows){const d=r.dataset;
- const ok=(filter==='all'||(filter==='long'&&d.st==='1')||(filter==='short'&&d.st==='-1')||
- (filter==='abuy'&&+d.adx>0)||(filter==='asell'&&+d.adx<0)||(filter==='near'&&+d.dist<=NEAR)||
- (filter==='both'&&((d.st==='1'&&+d.adx>0)||(d.st==='-1'&&+d.adx<0))))&&d.sym.includes(query);
- r.style.display=ok?'':'none';n+=ok;}document.getElementById('shown').textContent=n+' shown';}
-chips('tbl',f=>{filter=f;apply();});
-document.getElementById('q').oninput=e=>{query=e.target.value.trim().toUpperCase();apply();};
-let sortKey='dist',asc=true;const tb=document.querySelector('#stocks tbody');
-document.querySelectorAll('#stocks th[data-k]').forEach(th=>th.onclick=()=>{
- const k=th.dataset.k;asc=(k===sortKey)?!asc:(k==='sym'||k==='dist');sortKey=k;
- document.querySelectorAll('#stocks th').forEach(x=>x.classList.remove('sorted','desc'));
- th.classList.add('sorted');if(!asc)th.classList.add('desc');
- rows.sort((a,b)=>{const x=a.dataset[k],y=b.dataset[k];
-  const v=(k==='sym')?x.localeCompare(y):(+x)-(+y);return asc?v:-v;});
- rows.forEach(r=>tb.appendChild(r));});
-apply();
+ r.dataset.theme=dark?'light':'dark';try{localStorage.setItem('theme',r.dataset.theme)}catch(e){}};
+/* status */
+(()=>{const t=new Date(document.body.dataset.scanned),st=$('#status'),m=(Date.now()-t)/6e4;if(isNaN(m))return;
+ const ago=m<1?'just now':m<120?Math.round(m)+' min ago':m<2880?Math.round(m/60)+' h ago':Math.round(m/1440)+' days ago';
+ if(m<=25){st.classList.add('live');st.querySelector('.lbl').textContent='Live · '+ago;}
+ else{st.classList.add('old');st.querySelector('.lbl').textContent='Updated '+ago;
+ st.title='Scans run Mon–Fri 9:15 AM – 3:30 PM IST';}})();
+/* tabs */
+function show(id){$$('.tab').forEach(t=>t.classList.toggle('on',t.dataset.v===id));
+ $$('.view').forEach(v=>v.classList.toggle('on',v.id==='v-'+id));try{localStorage.setItem('tab',id)}catch(e){}}
+$$('.tab').forEach(t=>t.onclick=()=>{show(t.dataset.v);history.replaceState(null,'','#'+t.dataset.v)});
+const ok=v=>v&&$('#v-'+v);let first=location.hash.slice(1);
+if(!ok(first)){try{first=localStorage.getItem('tab')}catch(e){}}show(ok(first)?first:'live');
+/* segmented controls + filters */
+function seg(el,fn){const bs=$$('button',el);bs.forEach(b=>b.onclick=()=>{bs.forEach(x=>x.classList.remove('on'));
+ b.classList.add('on');fn(b.dataset.f)})}
+function filterer(tbodySel,countSel){const rows=$$(tbodySel+' tr[data-sym]'),f={};
+ const run=()=>{let n=0;for(const r of rows){const d=r.dataset;let ok=true;
+  for(const[k,v]of Object.entries(f)){if(v===''||v==='all')continue;
+   if(k==='q'){if(!d.sym.includes(v))ok=false}else if(k==='conf'){if(v&&d.conf!=='1')ok=false}
+   else if(k==='view'){ok=ok&&VIEWS[v](d)}else if(d[k]!==v)ok=false}
+  r.style.display=ok?'':'none';n+=ok}
+  if(countSel)$(countSel).textContent=n+' shown';const e=$(tbodySel+' .nores');if(e)e.style.display=n?'none':'';};
+ return {set(k,v){f[k]=v;run()},run}}
+const VIEWS={all:()=>true,aligned:d=>(d.st==='1'&&+d.adx>0)||(d.st==='-1'&&+d.adx<0),near:d=>+d.dist<=NEAR,
+ long:d=>d.st==='1',short:d=>d.st==='-1',abuy:d=>+d.adx>0,asell:d=>+d.adx<0};
+const live=filterer('#t-live tbody');seg($('#f-live-dir'),v=>live.set('dir',v));
+const past=filterer('#t-past tbody','#c-past');
+seg($('#f-past-day'),v=>{past.set('day',v);$$('.daysum').forEach(x=>x.style.display=x.dataset.day===v?'':'none')});
+seg($('#f-past-dir'),v=>past.set('dir',v));seg($('#f-past-strat'),v=>past.set('strat',v));
+$('#f-past-conf').onchange=e=>past.set('conf',e.target.checked);
+$('#f-past-q').oninput=e=>past.set('q',e.target.value.trim().toUpperCase());
+const fb=$('#f-past-day button');if(fb)fb.click();
+const stk=filterer('#t-stocks tbody','#c-stocks');seg($('#f-stk-view'),v=>stk.set('view',v));
+$('#f-stk-q').oninput=e=>stk.set('q',e.target.value.trim().toUpperCase());stk.run();
+/* sortable tables */
+$$('table[data-sort]').forEach(tbl=>{const tb=$('tbody',tbl);let key=tbl.dataset.sort,asc=true;
+ $$('th[data-k]',tbl).forEach(th=>th.onclick=()=>{const k=th.dataset.k;asc=k===key?!asc:th.dataset.asc==='1';key=k;
+  $$('th',tbl).forEach(x=>x.classList.remove('sorted','desc'));th.classList.add('sorted');if(!asc)th.classList.add('desc');
+  const rows=$$('tr[data-sym]',tb);rows.sort((a,b)=>{const x=a.dataset[k],y=b.dataset[k];
+   const v=isNaN(+x)||isNaN(+y)?x.localeCompare(y):(+x)-(+y);return asc?v:-v});rows.forEach(r=>tb.appendChild(r))})});
 """
 
+
+# ── formatting helpers ─────────────────────────────────────────────────────
 
 def _fmt_price(p):
     return f"{p:,.2f}" if isinstance(p, (int, float)) else "—"
@@ -638,314 +658,407 @@ def fmt_stamp(ts, year=False):
         return str(ts)
 
 
+def _direction(label):
+    return "sell" if "SELL" in label else "buy"
+
+
+def _pct(v, signed=True):
+    if v is None:
+        return '<span class="fa">—</span>'
+    if abs(v) < 0.005:
+        return '<span class="mu">0.00%</span>'
+    cls = "up" if v > 0 else "dn"
+    return f'<span class="{cls}">{v:+.2f}%</span>' if signed else f'<span class="{cls}">{v:.2f}%</span>'
+
+
+def _tag(label, kind=None):
+    kind = kind or ("dn" if "SELL" in label else "up")
+    return f'<span class="tag {kind}">{html_lib.escape(label.replace("_", " "))}</span>'
+
+
+def _st_tag(st):
+    return {1: _tag("LONG", "up"), -1: _tag("SHORT", "dn")}.get(st, '<span class="fa">—</span>')
+
+
+def _adx_tag(adx):
+    label = ADX_LABELS.get(adx, "—")
+    return _tag(label) if adx else '<span class="fa">—</span>'
+
+
+def _strat_name(strategy):
+    return "SuperTrend" if strategy == "SuperTrend" else "ADX DI"
+
+
+def _bars_txt(bars, still_open):
+    if bars is None:
+        return '<span class="fa">—</span>'
+    if still_open:
+        return '<span class="tag ok">new</span>' if bars == 0 else f'<span class="mu">{bars}+</span>'
+    return str(bars)
+
+
+# ── analytics ──────────────────────────────────────────────────────────────
+
 def _current_price(state, name):
     info = state.get(name) or state.get(INDEX_STATE_PREFIX + name) or {}
     return info.get("last_close")
 
 
-def _move_since(signal, now_px):
-    """% price move since a signal fired: (move %, in the signal's favour?)."""
-    if not now_px or not signal.get("price"):
-        return None, None
-    move = (now_px / signal["price"] - 1) * 100.0
-    return move, (move > 0 if _direction(signal["label"]) == "buy" else move < 0)
+def outcome(sig, now_px):
+    """(move in the signal's favour %, closed?) — at the bar where its strategy
+    flipped if it has, else from signal price to `now_px`."""
+    end = sig.get("exit_price") if not sig.get("open", True) else now_px
+    if not end or not sig.get("price"):
+        return None, not sig.get("open", True)
+    move = (end / sig["price"] - 1) * 100.0
+    return (move if _direction(sig["label"]) == "buy" else -move), not sig.get("open", True)
 
 
-def _since_html(signal, now_px):
-    """▲/▼ = price went up/down since the signal; green = in the signal's favour."""
-    move, favour = _move_since(signal, now_px)
-    if move is None:
-        return '<span class="flat">—</span>'
-    if abs(move) < 0.005:
-        return '<span class="chg flat">0.00%</span>'
-    return (f'<span class="chg {"up" if favour else "dn"}" title="Price '
-            f'{"up" if move > 0 else "down"} {abs(move):.2f}% since the signal">'
-            f'{"▲" if move > 0 else "▼"}{abs(move):.2f}%</span>')
-
-
-def _fmt_chg(chg):
-    if chg is None:
-        return '<span class="flat">—</span>'
-    cls = "up" if chg > 0 else ("dn" if chg < 0 else "flat")
-    return f'<span class="chg {cls}">{chg:+.2f}%</span>'
-
-
-def _st_pill(st):
-    if st == 1:
-        return '<span class="pill up">LONG</span>'
-    if st == -1:
-        return '<span class="pill dn">SHORT</span>'
-    return '<span class="flat">—</span>'
-
-
-def _adx_pill(adx):
-    label = ADX_LABELS.get(adx, "—")
-    cls = "up" if adx and adx > 0 else ("dn" if adx and adx < 0 else "")
-    return f'<span class="pill {cls}">{label}</span>' if cls else '<span class="flat">—</span>'
-
-
-def _direction(label):
-    return "sell" if "SELL" in label else "buy"
-
-
-def _signal_pill(label, big=False):
-    return (f'<span class="pill {"dn" if "SELL" in label else "up"}{" big" if big else ""}">'
-            f'{html_lib.escape(label)}</span>')
-
-
-def _fmt_bars(s):
-    """'7 bars' (≈1h 45m on 15-min bars), or '12+ open' if it hasn't flipped yet."""
-    if s.get("bars") is None:
-        return ""
-    mins = s["bars"] * 15
-    dur = f"{mins // 60}h {mins % 60:02d}m" if mins >= 60 else f"{mins}m"
-    if s.get("open") and s["bars"] == 0:
-        return '<span class="bars open" title="Fired on the latest bar">new</span>'
-    if s.get("open"):
-        return (f'<span class="bars open" title="Not flipped yet — {s["bars"]} bars (≈{dur}) so far">'
-                f'{s["bars"]}+ open</span>')
-    return (f'<span class="bars" title="Flipped after {s["bars"]} bar{"s" if s["bars"] != 1 else ""} (≈{dur})">'
-            f'{s["bars"]} bar{"s" if s["bars"] != 1 else ""}</span>')
-
-
-def _sig_row(s, state, scan_time=None):
-    """One signal line: time, name, label, strategy, price at signal, move since
-    (and, for history rows, how many bars until that strategy flipped)."""
-    e = html_lib.escape
-    hist = "bars" in s
-    return (f'<div class="sig{" h" if hist else ""}{" fresh" if s["time"] == scan_time else ""}" '
-            f'data-dir="{_direction(s["label"])}">'
-            f'<span class="t">{e(fmt_time(s["time"]))}</span><span class="n">{e(s["name"])}</span>'
-            f'{_signal_pill(s["label"])}<span class="flat st">{e(s["strategy"])}</span>'
-            f'<span class="p">{_fmt_price(s["price"])}</span>'
-            f'<span class="since">{_since_html(s, _current_price(state, s["name"]))}</span>'
-            f'{_fmt_bars(s) if hist else ""}</div>')
-
-
-def find_confluence(log):
+def find_confluence(signals, days=None):
     """Stocks where SuperTrend and ADX_DI both fired the same direction on the
-    same trading day. Uses each strategy's latest signal that day, so a buy
-    later reversed by a sell doesn't count. Returns {day: [entry, ...]},
-    newest day first; each entry's "time" is when the second signal landed."""
-    latest = {}  # (day, name) -> {strategy: signal}
-    for s in log:
+    same trading day (the latest signal of each strategy that day counts).
+    Returns {day: [entry, ...]} newest day first; an entry's "time"/"price"
+    are those of the second (confirming) signal."""
+    latest = {}
+    for s in sorted(signals, key=lambda x: x["time"]):
         latest.setdefault((s["time"][:10], s["name"]), {})[s["strategy"]] = s
     by_day = {}
     for (day, name), strat in latest.items():
         st, adx = strat.get("SuperTrend"), strat.get("ADX_DI")
         if st and adx and _direction(st["label"]) == _direction(adx["label"]):
-            last = max(st, adx, key=lambda s: s["time"])
-            by_day.setdefault(day, []).append({
-                "name": name, "dir": _direction(st["label"]), "time": last["time"],
-                "price": last["price"], "st": st, "adx": adx})
+            last = max(st, adx, key=lambda x: x["time"])
+            by_day.setdefault(day, []).append({"name": name, "dir": _direction(st["label"]),
+                                               "time": last["time"], "price": last["price"],
+                                               "st": st, "adx": adx})
     for entries in by_day.values():
         entries.sort(key=lambda x: x["time"], reverse=True)
-    return dict(sorted(by_day.items(), reverse=True)[:CONFLUENCE_DAYS])
+    days_sorted = sorted(by_day, reverse=True)
+    return {d: by_day[d] for d in (days_sorted[:days] if days else days_sorted)}
 
 
-def _confluence_card(c, state, scan_time):
-    e = html_lib.escape
-    info = state.get(c["name"]) or state.get(INDEX_STATE_PREFIX + c["name"]) or {}
-    cls = "up" if c["dir"] == "buy" else "dn"
-    fresh = " fresh" if c["time"] == scan_time else ""
-    return (f'<div class="card {cls}{fresh}"><div class="top"><span class="name">{e(c["name"])}</span>'
-            f'<span class="pill {cls} big">CONFIRMED {c["dir"].upper()}</span></div>'
-            f'<div class="px">{_fmt_price(info.get("last_close", c["price"]))}'
-            f' <span style="font-size:13px">{_fmt_chg(info.get("day_chg_pct"))}</span></div>'
-            f'<div class="row"><span>SuperTrend</span><span>{_signal_pill(c["st"]["label"])} '
-            f'{e(fmt_time(c["st"]["time"]))} @ {_fmt_price(c["st"]["price"])}</span></div>'
-            f'<div class="row"><span>ADX DI</span><span>{_signal_pill(c["adx"]["label"])} '
-            f'{e(fmt_time(c["adx"]["time"]))} @ {_fmt_price(c["adx"]["price"])}</span></div>'
-            f'<div class="row"><span>Since confirmed</span>'
-            f'{_since_html({"label": c["dir"].upper(), "price": c["price"]}, info.get("last_close"))}'
-            f'</div></div>')
+def _slot_counter(signals):
+    """Map a bar close-time to a running 15-min bar number across sessions, so
+    bars between two times can be counted across overnight gaps."""
+    days = sorted({t[:10] for s in signals for t in (s["time"], s.get("exit_time") or s["time"])})
+    index = {d: i for i, d in enumerate(days)}
 
+    def slot(t):
+        d = _ist(t)
+        return index.get(t[:10], 0) * SESSION_BARS + ((d.hour * 60 + d.minute) - 570) // 15
+    return slot
+
+
+def confirmed_trades(archive):
+    """Double confirmations treated as one trade: entered when the second
+    strategy confirms, exited when the first of the two flips. Skipped if the
+    first signal had already flipped before the second one arrived."""
+    slot = _slot_counter(archive)
+    trades = []
+    for day, entries in find_confluence(archive).items():
+        for c in entries:
+            first, second = sorted((c["st"], c["adx"]), key=lambda x: x["time"])
+            if not first.get("open", True) and first["exit_time"] <= second["time"]:
+                continue
+            exits = [x for x in (first, second) if not x.get("open", True)]
+            ex = min(exits, key=lambda x: x["exit_time"]) if exits else None
+            trades.append({"name": c["name"], "label": "BUY" if c["dir"] == "buy" else "SELL",
+                           "time": second["time"], "price": second["price"], "open": ex is None,
+                           "exit_price": ex["exit_price"] if ex else None,
+                           "exit_time": ex["exit_time"] if ex else None,
+                           "bars": slot(ex["exit_time"]) - slot(second["time"]) if ex else None})
+    return trades
+
+
+def accuracy_stats(signals, state):
+    n = len(signals)
+    closed, live = [], []
+    bars = []
+    for s in signals:
+        mv, is_closed = outcome(s, _current_price(state, s["name"]))
+        if mv is None:
+            continue
+        (closed if is_closed else live).append(mv)
+        if is_closed and s.get("bars") is not None:
+            bars.append(s["bars"])
+    med = lambda xs: float(np.median(xs)) if xs else None  # noqa: E731
+    return {"n": n, "closed": len(closed), "open": len(live),
+            "win": (sum(m > 0 for m in closed) / len(closed) * 100) if closed else None,
+            "bars": med(bars), "move": med(closed), "avg": float(np.mean(closed)) if closed else None,
+            "open_move": med(live)}
+
+
+# ── page ───────────────────────────────────────────────────────────────────
 
 def write_dashboard(state):
-    """Render dashboard.html from the state file — a static page, no server:
-    summary tiles, index cards, stocks where both strategies agree, the
-    day's signal timeline, and a filterable/sortable table of every stock."""
+    """Render dashboard.html from the state file — a static page with four tabs:
+    Live (indices, today's confirmations and signals), Past signals (day-wise
+    replay of the last HISTORY_DAYS sessions), Accuracy (win rate, median bars
+    and median move per signal type over the archive) and Stocks."""
     e = html_lib.escape
     meta = state.get(SCAN_META_KEY, {})
     scan_time = meta.get("time")
     universe = meta.get("universe") or NIFTY150
     stocks = {s: state[s] for s in universe if s in state}
     log = state.get(SIGNAL_LOG_KEY, [])
+    archive = state.get(ARCHIVE_KEY, [])
 
-    # summary tiles
-    latest_day = log[-1]["time"][:10] if log else None
-    today = [s for s in log if s["time"][:10] == latest_day][::-1]
-    n_buy = sum(_direction(s["label"]) == "buy" for s in today)
-    st_long = sum(v.get("st_trend") == 1 for v in stocks.values())
-    st_short = sum(v.get("st_trend") == -1 for v in stocks.values())
-    adx_buy = sum((v.get("adx_cond") or 0) > 0 for v in stocks.values())
-    adx_sell = sum((v.get("adx_cond") or 0) < 0 for v in stocks.values())
-    confluence = find_confluence(log)
-    conf_today = confluence.get(latest_day, []) if latest_day else []
-
-    def bar(u, d):
-        tot = (u + d) or 1
-        return (f'<div class="bar"><span class="u" style="width:{u / tot * 100:.1f}%"></span>'
-                f'<span class="d" style="width:{d / tot * 100:.1f}%"></span></div>')
-
-    tiles = (
-        f'<div class="tile"><div class="k">Signals {"today" if latest_day else ""}</div>'
-        f'<div class="v">{len(today)}</div><div class="s">{n_buy} buy · {len(today) - n_buy} sell</div>'
-        f'{bar(n_buy, len(today) - n_buy)}</div>'
-        f'<div class="tile"><div class="k">Confirmed</div><div class="v">{len(conf_today)}</div>'
-        f'<div class="s">{sum(c["dir"] == "buy" for c in conf_today)} buy · '
-        f'{sum(c["dir"] == "sell" for c in conf_today)} sell</div></div>'
-        f'<div class="tile"><div class="k">SuperTrend</div><div class="v">{st_long}<span class="s"> / '
-        f'{st_short}</span></div><div class="s">long / short</div>{bar(st_long, st_short)}</div>'
-        f'<div class="tile"><div class="k">ADX DI</div><div class="v">{adx_buy}<span class="s"> / '
-        f'{adx_sell}</span></div><div class="s">buy / sell state</div>{bar(adx_buy, adx_sell)}</div>')
-
-    # indices
-    cards = []
+    # ── index strip
+    ix_html = []
     for name in INDEX_TICKERS:
         info = state.get(INDEX_STATE_PREFIX + name)
         if not info:
             continue
         dist = info.get("distance_pct")
-        cls = "up" if info.get("st_trend") == 1 else ("dn" if info.get("st_trend") == -1 else "")
-        cards.append(
-            f'<div class="card {cls}"><div class="top"><span class="name">{e(name)}</span>'
-            f'{_fmt_chg(info.get("day_chg_pct"))}</div>'
+        dist_txt = e(f"{dist:.2f}% to flip") if dist is not None else ""
+        ix_html.append(
+            f'<div class="panel ix"><div class="nm" title="{e(name)}">{e(name)}</div>'
             f'<div class="px">{_fmt_price(info.get("last_close"))}</div>'
-            f'<div class="row"><span>SuperTrend</span>{_st_pill(info.get("st_trend"))}</div>'
-            f'<div class="row"><span>ADX DI</span>{_adx_pill(info.get("adx_cond"))}</div>'
-            f'<div class="row"><span>To flip</span><span>'
-            f'{f"{dist:.2f}%" if dist is not None else "—"}</span></div></div>')
+            f'<div class="ft">{_pct(info.get("day_chg_pct"))}'
+            f'<span class="sm">{dist_txt}</span></div>'
+            f'<div class="tags">{_st_tag(info.get("st_trend"))}{_adx_tag(info.get("adx_cond"))}</div></div>')
 
-    # both strategies agree
-    if conf_today:
-        conf_html = '<div class="cards wide">' + "".join(
-            _confluence_card(c, state, scan_time) for c in conf_today) + "</div>"
-    else:
-        conf_html = ('<div class="empty">No stock has had a buy or sell confirmed by both '
-                     f'strategies {"on " + e(fmt_day(latest_day)) if latest_day else "yet"}.</div>')
-    earlier = [(d, cs) for d, cs in confluence.items() if d != latest_day]
-    if earlier:
-        conf_html += (f'<details><summary>Earlier days ({sum(len(cs) for _, cs in earlier)})</summary>'
-                      + "".join(f'<div class="day">{e(fmt_day(d))}</div><div class="cards wide">'
-                                + "".join(_confluence_card(c, state, scan_time) for c in cs)
-                                + "</div>" for d, cs in earlier) + "</details>")
+    # ── live: today's signals + confirmations
+    latest_day = log[-1]["time"][:10] if log else None
+    today = [s for s in log if s["time"][:10] == latest_day][::-1]
+    n_buy = sum(_direction(s["label"]) == "buy" for s in today)
+    conf_today = find_confluence(log).get(latest_day, []) if latest_day else []
+    st_long = sum(v.get("st_trend") == 1 for v in stocks.values())
+    st_short = sum(v.get("st_trend") == -1 for v in stocks.values())
+    adx_buy = sum((v.get("adx_cond") or 0) > 0 for v in stocks.values())
+    adx_sell = sum((v.get("adx_cond") or 0) < 0 for v in stocks.values())
 
-    # signal timeline
-    sig_rows = "".join(_sig_row(s, state, scan_time) for s in today)
+    def split(u, d):
+        t = (u + d) or 1
+        return f'<div class="split"><b style="width:{u / t * 100:.1f}%"></b><i style="width:{d / t * 100:.1f}%"></i></div>'
 
-    # signal history: bar-by-bar replay over the last HISTORY_DAYS trading days
-    history = sorted((h for key in list(stocks) + [INDEX_STATE_PREFIX + n for n in INDEX_TICKERS]
-                      for h in state.get(key, {}).get("history", [])), key=lambda h: h["time"])
-    hist_conf = find_confluence(history)
-    hist_blocks = []
-    for n, day in enumerate(sorted({h["time"][:10] for h in history}, reverse=True)):
-        day_sigs = [h for h in history if h["time"][:10] == day][::-1]
-        n_b = sum(_direction(h["label"]) == "buy" for h in day_sigs)
-        confs = hist_conf.get(day, [])
-        avg = []
-        for strat, short in (("SuperTrend", "ST"), ("ADX_DI", "ADX")):
-            closed = [h["bars"] for h in day_sigs if h["strategy"] == strat and not h.get("open")]
-            if closed:
-                avg.append(f"{short} {sum(closed) / len(closed):.1f}")
-        avg_txt = f" · avg bars to flip: {', '.join(avg)}" if avg else ""
-        conf_line = ('<div class="confline"><span class="flat">Confirmed:</span> ' + " ".join(
-            f'<span class="pill {"up" if c["dir"] == "buy" else "dn"}">{e(c["name"])} · '
-            f'{c["dir"].upper()} {e(fmt_time(c["time"]))}</span>' for c in confs) + "</div>") if confs else ""
-        hist_blocks.append(
-            f'<details class="hday"{" open" if n == 0 else ""}><summary><b>{e(fmt_day(day))}</b>'
-            f'<span class="flat">{len(day_sigs)} signals · {n_b} buy · {len(day_sigs) - n_b} sell · '
-            f'{len(confs)} confirmed{avg_txt}</span></summary>{conf_line}'
-            f'<div class="list">{"".join(_sig_row(h, state) for h in day_sigs)}</div></details>')
+    kpis = (
+        f'<div class="panel kpi"><div class="k">Signals {"today" if latest_day else ""}</div>'
+        f'<div class="v">{len(today)}</div><div class="s"><span class="up">{n_buy} buy</span> · '
+        f'<span class="dn">{len(today) - n_buy} sell</span></div>{split(n_buy, len(today) - n_buy)}</div>'
+        f'<div class="panel kpi"><div class="k">Double confirmations</div><div class="v">{len(conf_today)}</div>'
+        f'<div class="s"><span class="up">{sum(c["dir"] == "buy" for c in conf_today)} buy</span> · '
+        f'<span class="dn">{sum(c["dir"] == "sell" for c in conf_today)} sell</span></div></div>'
+        f'<div class="panel kpi"><div class="k">SuperTrend</div><div class="v">{st_long}'
+        f'<span class="mu" style="font-size:14px"> / {st_short}</span></div><div class="s">long / short</div>'
+        f'{split(st_long, st_short)}</div>'
+        f'<div class="panel kpi"><div class="k">ADX DI</div><div class="v">{adx_buy}'
+        f'<span class="mu" style="font-size:14px"> / {adx_sell}</span></div><div class="s">buy / sell state</div>'
+        f'{split(adx_buy, adx_sell)}</div>')
 
-    # stock table, nearest-to-flip first
-    def nearest_first(sym):
-        dist = stocks[sym].get("distance_pct")
-        return (dist is None, dist or 0.0)
+    def now_move(s):
+        mv, _ = outcome({**s, "open": True}, _current_price(state, s["name"]))
+        return mv
 
+    conf_rows = "".join(
+        f'<tr data-sym="{e(c["name"])}"><td class="sym">{e(c["name"])}</td>'
+        f'<td>{_tag("CONFIRMED " + c["dir"].upper())}</td>'
+        f'<td>{_tag(c["st"]["label"])} <span class="mu">{e(fmt_time(c["st"]["time"]))}</span></td>'
+        f'<td>{_tag(c["adx"]["label"])} <span class="mu">{e(fmt_time(c["adx"]["time"]))}</span></td>'
+        f'<td class="r">{_fmt_price(c["price"])}</td><td class="r">{_fmt_price(_current_price(state, c["name"]))}</td>'
+        f'<td class="r">{_pct(now_move({"label": c["dir"].upper(), "price": c["price"], "name": c["name"]}))}</td></tr>'
+        for c in conf_today)
+    live_rows = "".join(
+        f'<tr data-sym="{e(s["name"])}" data-dir="{_direction(s["label"])}"'
+        f'{" class=fresh" if s["time"] == scan_time else ""}>'
+        f'<td class="mu">{e(fmt_time(s["time"]))}</td><td class="sym">{e(s["name"])}</td><td>{_tag(s["label"])}</td>'
+        f'<td class="mu hide-sm">{_strat_name(s["strategy"])}</td><td class="r">{_fmt_price(s["price"])}</td>'
+        f'<td class="r">{_pct(now_move(s))}</td></tr>' for s in today)
+
+    # ── past signals (replayed, last HISTORY_DAYS sessions)
+    days_all = sorted({h["time"][:10] for h in archive}, reverse=True)
+    past_days = days_all[:HISTORY_DAYS]
+    past = sorted((h for h in archive if h["time"][:10] in past_days), key=lambda h: h["time"], reverse=True)
+    conf_keys = {(d, c["name"]) for d, cs in find_confluence(past).items() for c in cs}
+    past_rows = []
+    for h in past:
+        mv, closed = outcome(h, _current_price(state, h["name"]))
+        conf = (h["time"][:10], h["name"]) in conf_keys
+        past_rows.append(
+            f'<tr data-sym="{e(h["name"])}" data-day="{h["time"][:10]}" data-dir="{_direction(h["label"])}" '
+            f'data-strat="{h["strategy"]}" data-conf="{int(conf)}" data-t="{h["time"]}" '
+            f'data-mv="{mv if mv is not None else -999}" data-bars="{h.get("bars") or 0}">'
+            f'<td class="mu">{e(fmt_time(h["time"]))}</td>'
+            f'<td class="sym">{e(h["name"])}{" " + _tag("✓", "ok") if conf else ""}</td>'
+            f'<td>{_tag(h["label"])}</td><td class="mu hide-sm">{_strat_name(h["strategy"])}</td>'
+            f'<td class="r hide-sm">{_fmt_price(h["price"])}</td>'
+            f'<td class="r hide-sm">{_fmt_price(h.get("exit_price")) if closed else "<span class=fa>open</span>"}</td>'
+            f'<td class="r">{_pct(mv)}</td><td class="r">{_bars_txt(h.get("bars"), not closed)}</td></tr>')
+    day_btns = "".join(f'<button data-f="{d}">{e(fmt_day(d))}</button>' for d in past_days)
+    day_sums = []
+    for d in past_days:
+        ds = [h for h in past if h["time"][:10] == d]
+        b = sum(_direction(h["label"]) == "buy" for h in ds)
+        acc = accuracy_stats(ds, state)
+        parts = [f"<span><b>{len(ds)}</b> signals</span>", f'<span class="up">{b} buy</span>',
+                 f'<span class="dn">{len(ds) - b} sell</span>',
+                 f"<span><b>{sum(1 for k in conf_keys if k[0] == d)}</b> double confirmations</span>"]
+        if acc["bars"] is not None:
+            parts.append(f"<span>median <b>{acc['bars']:.0f}</b> bars to flip</span>")
+        if acc["win"] is not None:
+            parts.append(f"<span>win rate <b>{acc['win']:.0f}%</b> ({acc['closed']} closed)</span>")
+        day_sums.append(f'<div class="daysum" data-day="{d}">{"".join(parts)}</div>')
+
+    # ── accuracy (whole archive)
+    groups = [
+        ("SuperTrend", [("BUY", "SuperTrend", ("BUY",)), ("SELL", "SuperTrend", ("SELL",))]),
+        ("ADX DI", [("BUY", "ADX_DI", ("BUY",)), ("BUY STRONG", "ADX_DI", ("BUY_STRONG",)),
+                    ("SELL", "ADX_DI", ("SELL",)), ("SELL STRONG", "ADX_DI", ("SELL_STRONG",))]),
+    ]
+    trades = confirmed_trades(archive)
+
+    def acc_row(label, sigs, tag_label):
+        a = accuracy_stats(sigs, state)
+        win = (f'<div class="wr"><span style="min-width:38px">{a["win"]:.0f}%</span><span class="tr">'
+               f'<b class="{"lo" if a["win"] < 50 else ""}" style="width:{a["win"]:.0f}%"></b></span></div>'
+               if a["win"] is not None else '<span class="fa">—</span>')
+        bars = f"{a['bars']:.0f}" if a["bars"] is not None else "—"
+        return (f'<tr><td>{_tag(tag_label)} <span class="mu">{e(label)}</span></td><td class="r">{a["n"]}</td>'
+                f'<td class="r hide-sm">{a["closed"]}</td><td>{win}</td>'
+                f'<td class="r">{bars}</td>'
+                f'<td class="r">{_pct(a["move"])}</td><td class="r hide-sm">{_pct(a["avg"])}</td>'
+                f'<td class="r hide-sm">{a["open"]} · {_pct(a["open_move"])}</td></tr>')
+
+    acc_rows = []
+    for title, rows in groups:
+        acc_rows.append(f'<tr class="grp"><td colspan="8">{e(title)}</td></tr>')
+        for lbl, strat, labels in rows:
+            acc_rows.append(acc_row("", [h for h in archive if h["strategy"] == strat and h["label"] in labels], lbl))
+        acc_rows.append(acc_row("", [h for h in archive if h["strategy"] == (
+            "SuperTrend" if title == "SuperTrend" else "ADX_DI")], "ALL"))
+    acc_rows.append('<tr class="grp"><td colspan="8">Double confirmation (enter on 2nd signal, exit on 1st flip)</td></tr>')
+    acc_rows.append(acc_row("", [t for t in trades if t["label"] == "BUY"], "CONFIRMED BUY"))
+    acc_rows.append(acc_row("", [t for t in trades if t["label"] == "SELL"], "CONFIRMED SELL"))
+    overall = accuracy_stats(archive, state)
+    conf_all = accuracy_stats(trades, state)
+    span = (f"{fmt_day(days_all[-1])} – {fmt_day(days_all[0])} · {len(days_all)} sessions"
+            if days_all else "no data yet")
+    fmt_n = lambda v, f, suffix="": f"{v:{f}}{suffix}" if v is not None else "—"  # noqa: E731
+    acc_kpis = (
+        f'<div class="panel kpi"><div class="k">Signals tracked</div><div class="v">{overall["n"]}</div>'
+        f'<div class="s">{overall["closed"]} closed · {overall["open"]} open</div></div>'
+        f'<div class="panel kpi"><div class="k">Win rate (closed)</div><div class="v">'
+        f'{fmt_n(overall["win"], ".0f", "%")}</div>'
+        f'<div class="s">moved in the signal\'s favour by its flip</div></div>'
+        f'<div class="panel kpi"><div class="k">Median bars to flip</div><div class="v">'
+        f'{fmt_n(overall["bars"], ".0f")}</div>'
+        f'<div class="s">≈ {fmt_n(overall["bars"] * 15 / 60 if overall["bars"] is not None else None, ".1f", " h")} of trading</div></div>'
+        f'<div class="panel kpi"><div class="k">Confirmed setups win rate</div><div class="v">'
+        f'{fmt_n(conf_all["win"], ".0f", "%")}</div>'
+        f'<div class="s">{conf_all["closed"]} closed · median {_pct(conf_all["move"])}</div></div>')
+
+    # ── stocks
+    last_sig = {}
+    for h in sorted(archive, key=lambda x: x["time"]):
+        last_sig[h["name"]] = h
+    for s in log:
+        if s["name"] not in last_sig or s["time"] > last_sig[s["name"]]["time"]:
+            last_sig[s["name"]] = s
     fresh = {s["name"] for s in log if s["time"] == scan_time}
-    last_signal = {s["name"]: s for s in log}  # log is oldest-first -> keeps the latest
-    trs = []
-    for sym in sorted(stocks, key=nearest_first):
+    stock_rows = []
+    for sym in sorted(stocks, key=lambda x: (stocks[x].get("distance_pct") is None, stocks[x].get("distance_pct") or 0)):
         info = stocks[sym]
-        st, adx = info.get("st_trend"), info.get("adx_cond") or 0.0
-        dist, chg = info.get("distance_pct"), info.get("day_chg_pct")
-        sig = last_signal.get(sym)
-        move, favour = _move_since(sig, info.get("last_close")) if sig else (None, None)
-        # sort key: % move in the signal's favour (negative = going against it)
-        since_key = abs(move) * (1 if favour else -1) if move is not None else -999
-        last_html = (f'{_signal_pill(sig["label"])} {_since_html(sig, info.get("last_close"))}'
-                     f'<div class="flat" style="font-size:11px">{e(fmt_stamp(sig["time"]))}</div>'
-                     if sig else '<span class="flat">—</span>')
-        trs.append(
-            f'<tr{" class=fresh" if sym in fresh else ""} data-sym="{e(sym)}" data-st="{st}" '
-            f'data-adx="{adx}" data-dist="{dist if dist is not None else 999}" '
+        st, adx, dist, chg = (info.get("st_trend"), info.get("adx_cond") or 0.0,
+                              info.get("distance_pct"), info.get("day_chg_pct"))
+        ls = last_sig.get(sym)
+        dist_s = f"{dist:.2f}%" if dist is not None else "—"
+        mv = outcome({**ls, "open": True}, info.get("last_close"))[0] if ls else None
+        stock_rows.append(
+            f'<tr data-sym="{e(sym)}" data-st="{st}" data-adx="{adx}" data-dist="{dist if dist is not None else 999}" '
             f'data-chg="{chg if chg is not None else 0}" data-px="{info.get("last_close") or 0}" '
-            f'data-since="{since_key}">'
-            f'<td><b>{e(sym)}</b></td><td class="num">{_fmt_chg(chg)}</td>'
-            f'<td>{_st_pill(st)}</td><td>{_adx_pill(adx)}</td>'
-            f'<td class="num">{_fmt_price(info.get("last_close"))}</td>'
-            f'<td class="num">{f"{dist:.2f}%" if dist is not None else "—"}</td>'
-            f'<td>{last_html}</td>'
-            f'<td class="hide-sm flat">{e(fmt_stamp(info.get("last_ts", "")))}</td></tr>')
+            f'data-mv="{mv if mv is not None else -999}"{" class=fresh" if sym in fresh else ""}>'
+            f'<td class="sym">{e(sym)}</td><td class="r">{_fmt_price(info.get("last_close"))}</td>'
+            f'<td class="r">{_pct(chg)}</td><td>{_st_tag(st)}</td><td>{_adx_tag(adx)}</td>'
+            f'<td class="r">{dist_s}</td>'
+            f'<td>{(_tag(ls["label"]) + " " + _pct(mv) + "<div class=sm>" + e(fmt_stamp(ls["time"])) + "</div>") if ls else "<span class=fa>—</span>"}</td></tr>')
+
+    def table(tid, head, rows, empty, sort=None):
+        return (f'<div class="panel tw"><table id="{tid}"{f" data-sort={sort}" if sort else ""}><thead><tr>{head}</tr>'
+                f'</thead><tbody>{rows}<tr class="nores" style="display:{"none" if rows else ""}">'
+                f'<td colspan="9" class="empty">{empty}</td></tr></tbody></table></div>')
 
     scanned_iso = f"{scan_time.replace(' ', 'T')}+05:30" if scan_time else ""
+    sub = (f'{meta.get("checked")}/{meta.get("total")} stocks · {len(INDEX_TICKERS)} indices · '
+           f'{e(fmt_stamp(scan_time, year=True))} IST' if scan_time else "Waiting for the first full scan")
     page = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="300">
-<meta name="color-scheme" content="light dark">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta http-equiv="refresh" content="300"><meta name="color-scheme" content="light dark">
 <script>try{{const t=localStorage.getItem('theme');if(t==='light'||t==='dark')
 document.documentElement.dataset.theme=t;}}catch(e){{}}</script>
-<title>Nifty150 Live Signals</title><style>{DASHBOARD_CSS}</style></head>
-<body data-scanned="{e(scanned_iso)}"><main>
-<header><div><h1>Nifty150 Live Signals</h1>
-<div class="sub">SuperTrend ({ATR_PERIOD}×{MULTIPLIER:g}) + ADX DI · Nifty 100 + Midcap 50 ·
-{f'{meta.get("checked")}/{meta.get("total")} stocks · last scan {e(fmt_stamp(scan_time, year=True))} IST'
- if scan_time else "waiting for the first full scan (market days, 9:15 AM – 3:30 PM IST)"}</div></div>
-<div class="hdr-r"><button class="theme" id="theme" title="Switch light / dark" aria-label="Switch light / dark">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<title>Nifty150 Signals</title><style>{DASHBOARD_CSS}</style></head>
+<body data-scanned="{e(scanned_iso)}">
+<div class="top"><div class="wrap">
+<div class="bar1"><div class="brand"><div class="logo"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l5-5 4 4 8-9"/><path d="M15 7h5v5"/></svg></div><div style="min-width:0"><h1>Nifty150 Signals</h1>
+<div class="sub">SuperTrend ({ATR_PERIOD}×{MULTIPLIER:g}) + ADX DI · {sub}</div></div></div>
+<div class="tools-r"><span class="status" id="status"><i></i><span class="lbl">Waiting</span></span>
+<button class="iconbtn theme" id="theme" title="Light / dark" aria-label="Switch light or dark theme">
 <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
 stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
 <svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2
-M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button>
-<span class="status" id="status"><i></i> Waiting for first scan</span></div></header>
-<div class="tiles">{tiles}</div>
-<section><h2>Double confirmation <span class="count">{e(fmt_day(latest_day) if latest_day else "")}</span></h2>
-<p class="hint">SuperTrend and ADX DI both gave the same signal — buy or sell — on the same day
-(the latest signal of each counts).</p>{conf_html}</section>
-<section><h2>Indices</h2>
-<div class="cards">{"".join(cards) or '<div class="empty">No index data yet.</div>'}</div></section>
-<section id="signals"><h2>Signals <span class="count">{e(fmt_day(latest_day) if latest_day else "")}</span></h2>
-<div class="tools" data-group="sig"><button class="chip on" data-f="all">All</button>
-<button class="chip" data-f="buy">Buy</button><button class="chip" data-f="sell">Sell</button></div>
-<div class="list">{sig_rows or '<div class="empty" style="border:0">No signals yet.</div>'}</div></section>
-<section id="history"><h2>Signal history <span class="count">last {HISTORY_DAYS} trading days</span></h2>
-<p class="hint">Every signal the two strategies gave, replayed bar by bar from 15-minute data and
-grouped by day — times are when each bar closed, prices are that bar's close. "Bars" = how many
-15-minute bars the signal lasted before that strategy flipped (SuperTrend reversed / ADX left that side);
-"open" = not flipped yet.</p>
-<div class="tools" data-group="hist"><button class="chip on" data-f="all">All</button>
-<button class="chip" data-f="buy">Buy</button><button class="chip" data-f="sell">Sell</button></div>
-{"".join(hist_blocks) or '<div class="empty">No history yet — it fills in after the next scan.</div>'}</section>
-<section><h2>All stocks <span class="count" id="shown"></span></h2>
-<div class="tools" data-group="tbl"><input id="q" placeholder="Search symbol…" autocomplete="off">
-<button class="chip on" data-f="all">All</button>
-<button class="chip" data-f="both" title="SuperTrend and ADX DI point the same way right now">Trend aligned</button>
-<button class="chip" data-f="near" title="Within {WATCHLIST_PCT:g}% of a SuperTrend flip">Near flip</button>
-<button class="chip" data-f="long">SuperTrend long</button><button class="chip" data-f="short">SuperTrend short</button>
-<button class="chip" data-f="abuy">ADX buy</button><button class="chip" data-f="asell">ADX sell</button></div>
-<div class="tw"><table id="stocks"><thead><tr>
-<th data-k="sym">Stock</th><th class="num" data-k="chg">Chg</th><th data-k="st">SuperTrend</th>
-<th data-k="adx">ADX DI</th><th class="num" data-k="px">Price</th>
-<th class="num sorted" data-k="dist">To flip</th><th data-k="since">Last signal</th>
-<th class="hide-sm">Last bar</th></tr></thead>
-<tbody>{"".join(trs)}</tbody></table></div></section>
-<div class="foot">Highlighted = fired in the latest scan. ▲/▼ = price up/down since the signal fired;
-green when that move is in the signal's favour, red when against it. "To flip" = distance from price to
-the SuperTrend band it must cross. All times IST. Data: Yahoo Finance, ~15 min delayed; page refreshes every 5 min.
-SELL signals were not part of the backtests. Not investment advice.</div>
-</main><script>const NEAR={WATCHLIST_PCT};{DASHBOARD_JS}</script></body></html>"""
+<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+</button></div></div>
+<nav class="tabs"><button class="tab" data-v="live">Live<span class="n">{len(today)}</span></button>
+<button class="tab" data-v="past">Past signals<span class="n">{len(past)}</span></button>
+<button class="tab" data-v="accuracy">Accuracy</button>
+<button class="tab" data-v="stocks">Stocks<span class="n">{len(stocks)}</span></button></nav>
+</div></div>
+
+<main class="wrap">
+<div class="view" id="v-live">
+<div class="idx">{"".join(ix_html) or '<div class="panel empty" style="grid-column:1/-1">No index data yet.</div>'}</div>
+<div class="kpis">{kpis}</div>
+<section><div class="sh"><h2>Double confirmations</h2><span class="meta">{e(fmt_day(latest_day)) if latest_day else ""}</span></div>
+<p class="note">SuperTrend and ADX DI gave the same signal on the same day — the latest signal of each counts.</p>
+{table("t-conf", '<th>Stock</th><th>Setup</th><th>SuperTrend</th><th>ADX DI</th><th class="r">At signal</th><th class="r">Now</th><th class="r">Move</th>',
+       conf_rows, "No double confirmations today yet.")}</section>
+<section><div class="sh"><h2>Today's signals</h2><div class="seg" id="f-live-dir"><button class="on" data-f="all">All</button>
+<button data-f="buy">Buy</button><button data-f="sell">Sell</button></div></div>
+{table("t-live", '<th>Time</th><th>Stock</th><th>Signal</th><th class="hide-sm">Strategy</th><th class="r">Price</th><th class="r">Move</th>',
+       live_rows, "No signals yet today — they appear here as each scan finds them.")}</section>
+</div>
+
+<div class="view" id="v-past">
+<div class="sh"><h2>Past signals</h2><span class="meta" id="c-past"></span></div>
+<p class="note">Every signal from the last {HISTORY_DAYS} sessions, replayed bar by bar from 15-minute data. Time = bar close;
+<b>Move</b> = price change in the signal's favour up to its flip (or to now if still open); <b>Bars</b> = 15-min bars until
+that strategy flipped (SuperTrend reversed / ADX left that side). ✓ = part of a double confirmation that day.</p>
+<div class="tb"><div class="seg" id="f-past-day">{day_btns}</div>
+<div class="seg" id="f-past-dir"><button class="on" data-f="all">All</button><button data-f="buy">Buy</button><button data-f="sell">Sell</button></div>
+<div class="seg" id="f-past-strat"><button class="on" data-f="all">Both</button><button data-f="SuperTrend">SuperTrend</button><button data-f="ADX_DI">ADX DI</button></div>
+<label class="chk"><input type="checkbox" id="f-past-conf"> Confirmed only</label>
+<input type="search" id="f-past-q" placeholder="Search stock…" autocomplete="off"></div>
+{"".join(day_sums)}
+{table("t-past", '<th data-k="t" data-asc="0">Time</th><th data-k="sym" data-asc="1">Stock</th><th>Signal</th><th class="hide-sm">Strategy</th><th class="r hide-sm">Price</th><th class="r hide-sm">Exit</th><th class="r" data-k="mv" data-asc="0">Move</th><th class="r" data-k="bars" data-asc="1">Bars</th>',
+       "".join(past_rows), "No signals match these filters.", "t")}
+</div>
+
+<div class="view" id="v-accuracy">
+<div class="sh"><h2>Accuracy tracker</h2><span class="meta">{e(span)}</span></div>
+<p class="note">A signal <b>wins</b> if price moved in its favour (up after a buy, down after a sell) by the bar where that
+strategy flipped. <b>Median bars</b> = 15-min bars until the flip; <b>Median move</b> = typical % move in the signal's favour at
+the flip. Open signals aren't scored — their current move is shown separately. Builds up to {ARCHIVE_KEEP_DAYS} days of history.</p>
+<div class="kpis">{acc_kpis}</div>
+<div class="panel tw"><table><thead><tr><th>Signal</th><th class="r">Signals</th><th class="r hide-sm">Closed</th>
+<th>Win rate</th><th class="r">Median bars</th><th class="r">Median move</th><th class="r hide-sm">Avg move</th>
+<th class="r hide-sm">Open · now</th></tr></thead><tbody>{"".join(acc_rows)}</tbody></table></div>
+</div>
+
+<div class="view" id="v-stocks">
+<div class="sh"><h2>All stocks</h2><span class="meta" id="c-stocks"></span></div>
+<div class="tb"><input type="search" id="f-stk-q" placeholder="Search stock…" autocomplete="off">
+<div class="seg" id="f-stk-view"><button class="on" data-f="all">All</button><button data-f="aligned" title="SuperTrend and ADX DI point the same way">Aligned</button>
+<button data-f="near" title="Within {WATCHLIST_PCT:g}% of a SuperTrend flip">Near flip</button><button data-f="long">ST long</button>
+<button data-f="short">ST short</button><button data-f="abuy">ADX buy</button><button data-f="asell">ADX sell</button></div></div>
+{table("t-stocks", '<th data-k="sym" data-asc="1">Stock</th><th class="r" data-k="px" data-asc="0">Price</th><th class="r" data-k="chg" data-asc="0">Day</th><th data-k="st" data-asc="0">SuperTrend</th><th data-k="adx" data-asc="0">ADX DI</th><th class="r sorted" data-k="dist" data-asc="1">To flip</th><th data-k="mv" data-asc="0">Last signal</th>',
+       "".join(stock_rows), "No stocks match.", "dist")}
+</div>
+
+<div class="foot">All times IST. Data: Yahoo Finance (~15 min delayed); this page refreshes every 5 minutes.
+SELL signals and the accuracy figures are not from the original backtests. Not investment advice.</div>
+</main>
+<script>const NEAR={WATCHLIST_PCT};{DASHBOARD_JS}</script></body></html>"""
     DASHBOARD_FILE.write_text(page, encoding="utf-8")
 
 
@@ -1020,22 +1133,27 @@ def evaluate(name, df, prev):
 
     new_state = {"st_trend": st_trend, "adx_cond": adx_cond, "last_ts": last_ts,
                  "last_close": last_close, "distance_pct": distance_pct,
-                 "day_chg_pct": day_chg_pct,
-                 "history": bar_signals(name, df, c, trend, condition)}
+                 "day_chg_pct": day_chg_pct, "name": name,
+                 "history": bar_signals(name, df, c, trend, condition),
+                 "history_from": str(df.index[np.isin(dates, sorted(set(dates))[-REPLAY_DAYS:])][0])}
     return new_state, fired
 
 
-HISTORY_DAYS = 3  # trading days of bar-by-bar signal history shown on the dashboard
+HISTORY_DAYS = 3         # trading days shown in the dashboard's "Past signals" tab
+REPLAY_DAYS = 7          # trading days replayed per scan (of the 10 fetched; 3 left as warm-up)
+ARCHIVE_KEY = "__ARCHIVE__"
+ARCHIVE_KEEP_DAYS = 30   # calendar days of replayed signals kept for the accuracy tracker
 
 
 def bar_signals(name, df, close, trend, condition):
-    """Every signal the strategies gave, bar by bar, over the last HISTORY_DAYS
+    """Every signal the strategies gave, bar by bar, over the last REPLAY_DAYS
     trading days in `df` — the same state changes the live scan alerts on, but
     replayed on completed bars. "time" is the bar's close (start + 15 min),
     i.e. when a scan would have caught it; "price" is that bar's close.
     "bars" is how many 15-min bars the signal lasted before that strategy
     turned (SuperTrend flipped back / ADX left that side); "open" means it
-    hasn't turned yet and "bars" counts the bars so far."""
+    hasn't turned yet and "bars" counts the bars so far. "exit_price" /
+    "exit_time" are the close and close-time of the bar where it turned."""
     st_side = trend.astype(np.int8)
     adx_side = np.sign(condition).astype(np.int8)
 
@@ -1043,8 +1161,11 @@ def bar_signals(name, df, close, trend, condition):
         changed = np.nonzero(side[i + 1:] != side[i])[0]
         return (int(changed[0]) + 1, False) if len(changed) else (int(len(side) - 1 - i), True)
 
+    def close_time(j):
+        return (df.index[j] + pd.Timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
+
     dates = df.index.date
-    days = sorted(set(dates))[-HISTORY_DAYS:]
+    days = sorted(set(dates))[-REPLAY_DAYS:]
     out = []
     for i in np.nonzero(np.isin(dates, days))[0]:
         if i == 0:
@@ -1060,14 +1181,31 @@ def bar_signals(name, df, close, trend, condition):
         elif cur in (-1.0, -0.5) and prv not in (-1.0, -0.5):
             labels.append(("ADX_DI", "SELL_STRONG" if cur == -1.0 else "SELL"))
         if labels:
-            bar = df.index[i]
-            t = (bar + pd.Timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
             for strat, label in labels:
                 bars, still_open = bars_to_flip(st_side if strat == "SuperTrend" else adx_side, i)
-                out.append({"time": t, "strategy": strat, "name": name, "label": label,
-                            "price": float(close[i]), "bar": str(bar),
-                            "bars": bars, "open": still_open})
+                out.append({"time": close_time(i), "strategy": strat, "name": name, "label": label,
+                            "price": float(close[i]), "bar": str(df.index[i]),
+                            "bars": bars, "open": still_open,
+                            "exit_price": None if still_open else float(close[i + bars]),
+                            "exit_time": None if still_open else close_time(i + bars)})
     return out
+
+
+def archive_history(state, new_state):
+    """Move a symbol's freshly replayed signals into the rolling archive. The
+    replay window is authoritative: that symbol's archived signals inside it are
+    replaced (so a signal on a still-forming bar that disappears is dropped and
+    open signals get their exit filled in); older ones are kept up to
+    ARCHIVE_KEEP_DAYS for the accuracy tracker."""
+    history = new_state.pop("history", [])
+    since = new_state.pop("history_from", None)
+    if since is None:
+        return
+    name = history[0]["name"] if history else new_state.get("name")
+    cutoff = (datetime.now(IST) - timedelta(days=ARCHIVE_KEEP_DAYS)).strftime("%Y-%m-%d")
+    archive = [h for h in state.get(ARCHIVE_KEY, [])
+               if h["time"][:10] >= cutoff and not (h["name"] == name and h["bar"] >= since)]
+    state[ARCHIVE_KEY] = archive + history
 
 
 def build_scan_order(universe, state):
@@ -1086,7 +1224,7 @@ def build_scan_order(universe, state):
 
 
 def scan_indices(state):
-    """Same strategies on the index series themselves (NIFTY 50 / 100 / BANK)."""
+    """Same strategies on the index series themselves (see INDEX_TICKERS)."""
     fired = []
     for name, yf_ticker in INDEX_TICKERS.items():
         key = INDEX_STATE_PREFIX + name
@@ -1095,6 +1233,7 @@ def scan_indices(state):
             if df is None or len(df) < 60:
                 continue
             state[key], index_fired = evaluate(name, df, state.get(key, {}))
+            archive_history(state, state[key])
             fired.extend(index_fired)
         except Exception as e:
             print(f"[warn] index {name}: {e}")
@@ -1136,6 +1275,7 @@ def scan_once(per_symbol_delay=None):
                 continue
 
             state[symbol], symbol_fired = evaluate(symbol, df, state.get(symbol, {}))
+            archive_history(state, state[symbol])
             fired.extend(symbol_fired)
             checked += 1
 
