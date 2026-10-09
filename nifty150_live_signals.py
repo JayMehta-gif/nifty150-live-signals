@@ -545,6 +545,16 @@ th[data-k]:hover{color:var(--fg)}th.sorted::after{content:" ↑"}th.sorted.desc:
 tbody tr:hover td{background:var(--hover)}
 tr.fresh td{background:var(--hl)}
 tr:last-child td{border-bottom:0}
+.hday{margin:0 0 10px}
+.hday summary{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 12px;list-style:none;cursor:pointer;
+padding:10px 14px;background:var(--card);border:1px solid var(--line);border-radius:12px;color:var(--fg)}
+.hday summary::-webkit-details-marker{display:none}
+.hday summary::before{content:"▸";color:var(--muted)}.hday[open] summary::before{content:"▾"}
+.hday summary .flat{font-size:12px}
+.hday[open] summary{border-radius:12px 12px 0 0;border-bottom:0}
+.hday .list{border-radius:0 0 12px 12px;max-height:520px;overflow:auto}
+.confline{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:8px 14px;font-size:12px;
+background:var(--card);border:1px solid var(--line);border-bottom:0}
 .foot{color:var(--muted);font-size:12px;margin-top:22px;line-height:1.6}
 @media (max-width:760px){.tiles{grid-template-columns:repeat(2,1fr)}}
 @media (max-width:600px){main{padding:14px 12px 28px}.hide-sm{display:none}
@@ -567,6 +577,8 @@ function chips(group,fn){const cs=[...document.querySelectorAll('[data-group='+g
  cs.forEach(c=>c.onclick=()=>{cs.forEach(x=>x.classList.remove('on'));c.classList.add('on');fn(c.dataset.f);});}
 const sigs=[...document.querySelectorAll('#signals .sig')];
 chips('sig',f=>sigs.forEach(r=>r.style.display=(f==='all'||r.dataset.dir===f)?'':'none'));
+const hs=[...document.querySelectorAll('#history .sig')];
+chips('hist',f=>hs.forEach(r=>r.style.display=(f==='all'||r.dataset.dir===f)?'':'none'));
 const rows=[...document.querySelectorAll('#stocks tbody tr')];let filter='all',query='';
 function apply(){let n=0;for(const r of rows){const d=r.dataset;
  const ok=(filter==='all'||(filter==='long'&&d.st==='1')||(filter==='short'&&d.st==='-1')||
@@ -675,6 +687,16 @@ def _direction(label):
 def _signal_pill(label, big=False):
     return (f'<span class="pill {"dn" if "SELL" in label else "up"}{" big" if big else ""}">'
             f'{html_lib.escape(label)}</span>')
+
+
+def _sig_row(s, state, scan_time=None):
+    """One signal line: time, name, label, strategy, price at signal, move since."""
+    e = html_lib.escape
+    return (f'<div class="sig{" fresh" if s["time"] == scan_time else ""}" data-dir="{_direction(s["label"])}">'
+            f'<span class="t">{e(fmt_time(s["time"]))}</span><span class="n">{e(s["name"])}</span>'
+            f'{_signal_pill(s["label"])}<span class="flat st">{e(s["strategy"])}</span>'
+            f'<span class="p">{_fmt_price(s["price"])}</span>'
+            f'<span class="since">{_since_html(s, _current_price(state, s["name"]))}</span></div>')
 
 
 def find_confluence(log):
@@ -787,13 +809,25 @@ def write_dashboard(state):
                                 + "</div>" for d, cs in earlier) + "</details>")
 
     # signal timeline
-    sig_rows = "".join(
-        f'<div class="sig{" fresh" if s["time"] == scan_time else ""}" data-dir="{_direction(s["label"])}">'
-        f'<span class="t">{e(fmt_time(s["time"]))}</span><span class="n">{e(s["name"])}</span>'
-        f'{_signal_pill(s["label"])}<span class="flat st">{e(s["strategy"])}</span>'
-        f'<span class="p">{_fmt_price(s["price"])}</span>'
-        f'<span class="since">{_since_html(s, _current_price(state, s["name"]))}</span></div>'
-        for s in today)
+    sig_rows = "".join(_sig_row(s, state, scan_time) for s in today)
+
+    # signal history: bar-by-bar replay over the last HISTORY_DAYS trading days
+    history = sorted((h for key in list(stocks) + [INDEX_STATE_PREFIX + n for n in INDEX_TICKERS]
+                      for h in state.get(key, {}).get("history", [])), key=lambda h: h["time"])
+    hist_conf = find_confluence(history)
+    hist_blocks = []
+    for n, day in enumerate(sorted({h["time"][:10] for h in history}, reverse=True)):
+        day_sigs = [h for h in history if h["time"][:10] == day][::-1]
+        n_b = sum(_direction(h["label"]) == "buy" for h in day_sigs)
+        confs = hist_conf.get(day, [])
+        conf_line = ('<div class="confline"><span class="flat">Confirmed:</span> ' + " ".join(
+            f'<span class="pill {"up" if c["dir"] == "buy" else "dn"}">{e(c["name"])} · '
+            f'{c["dir"].upper()} {e(fmt_time(c["time"]))}</span>' for c in confs) + "</div>") if confs else ""
+        hist_blocks.append(
+            f'<details class="hday"{" open" if n == 0 else ""}><summary><b>{e(fmt_day(day))}</b>'
+            f'<span class="flat">{len(day_sigs)} signals · {n_b} buy · {len(day_sigs) - n_b} sell · '
+            f'{len(confs)} confirmed</span></summary>{conf_line}'
+            f'<div class="list">{"".join(_sig_row(h, state) for h in day_sigs)}</div></details>')
 
     # stock table, nearest-to-flip first
     def nearest_first(sym):
@@ -857,6 +891,12 @@ M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button>
 <div class="tools" data-group="sig"><button class="chip on" data-f="all">All</button>
 <button class="chip" data-f="buy">Buy</button><button class="chip" data-f="sell">Sell</button></div>
 <div class="list">{sig_rows or '<div class="empty" style="border:0">No signals yet.</div>'}</div></section>
+<section id="history"><h2>Signal history <span class="count">last {HISTORY_DAYS} trading days</span></h2>
+<p class="hint">Every signal the two strategies gave, replayed bar by bar from 15-minute data and
+grouped by day — times are when each bar closed, prices are that bar's close.</p>
+<div class="tools" data-group="hist"><button class="chip on" data-f="all">All</button>
+<button class="chip" data-f="buy">Buy</button><button class="chip" data-f="sell">Sell</button></div>
+{"".join(hist_blocks) or '<div class="empty">No history yet — it fills in after the next scan.</div>'}</section>
 <section><h2>All stocks <span class="count" id="shown"></span></h2>
 <div class="tools" data-group="tbl"><input id="q" placeholder="Search symbol…" autocomplete="off">
 <button class="chip on" data-f="all">All</button>
@@ -949,8 +989,41 @@ def evaluate(name, df, prev):
 
     new_state = {"st_trend": st_trend, "adx_cond": adx_cond, "last_ts": last_ts,
                  "last_close": last_close, "distance_pct": distance_pct,
-                 "day_chg_pct": day_chg_pct}
+                 "day_chg_pct": day_chg_pct,
+                 "history": bar_signals(name, df, c, trend, condition)}
     return new_state, fired
+
+
+HISTORY_DAYS = 3  # trading days of bar-by-bar signal history shown on the dashboard
+
+
+def bar_signals(name, df, close, trend, condition):
+    """Every signal the strategies gave, bar by bar, over the last HISTORY_DAYS
+    trading days in `df` — the same state changes the live scan alerts on, but
+    replayed on completed bars. "time" is the bar's close (start + 15 min),
+    i.e. when a scan would have caught it; "price" is that bar's close."""
+    dates = df.index.date
+    days = sorted(set(dates))[-HISTORY_DAYS:]
+    out = []
+    for i in np.nonzero(np.isin(dates, days))[0]:
+        if i == 0:
+            continue
+        labels = []
+        if trend[i - 1] == -1 and trend[i] == 1:
+            labels.append(("SuperTrend", "BUY"))
+        elif trend[i - 1] == 1 and trend[i] == -1:
+            labels.append(("SuperTrend", "SELL"))
+        cur, prv = condition[i], condition[i - 1]
+        if cur in (1.0, 0.5) and prv not in (1.0, 0.5):
+            labels.append(("ADX_DI", "BUY_STRONG" if cur == 1.0 else "BUY"))
+        elif cur in (-1.0, -0.5) and prv not in (-1.0, -0.5):
+            labels.append(("ADX_DI", "SELL_STRONG" if cur == -1.0 else "SELL"))
+        if labels:
+            bar = df.index[i]
+            t = (bar + pd.Timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
+            out += [{"time": t, "strategy": strat, "name": name, "label": label,
+                     "price": float(close[i]), "bar": str(bar)} for strat, label in labels]
+    return out
 
 
 def build_scan_order(universe, state):
