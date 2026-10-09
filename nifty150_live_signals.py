@@ -527,6 +527,9 @@ align-items:center;padding:9px 14px;border-bottom:1px solid var(--line)}
 .sig:last-child{border-bottom:0}.sig .t{color:var(--muted);font-size:12px}
 .sig .n{font-weight:600;overflow:hidden;text-overflow:ellipsis}.sig .pill{justify-self:start}.sig .p,.sig .since{text-align:right}
 .sig.fresh{background:var(--hl)}
+.sig.h{grid-template-columns:64px minmax(90px,150px) 110px 1fr auto 72px 64px}
+.bars{text-align:right;font-size:12px;color:var(--muted);white-space:nowrap}
+.bars.open{color:var(--accent)}
 .tools{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
 .tools input{flex:1 1 180px;padding:8px 12px;border:1px solid var(--line);border-radius:10px;
 background:var(--card);color:var(--fg);font:inherit}
@@ -559,6 +562,7 @@ background:var(--card);border:1px solid var(--line);border-bottom:0}
 @media (max-width:760px){.tiles{grid-template-columns:repeat(2,1fr)}}
 @media (max-width:600px){main{padding:14px 12px 28px}.hide-sm{display:none}
 .sig{grid-template-columns:58px 1fr auto 62px;gap:8px;padding:9px 12px}.sig .st,.sig .p{display:none}
+.sig.h{grid-template-columns:52px 1fr auto 58px 50px;gap:6px}
 th,td{padding:8px 9px}}
 """
 
@@ -689,14 +693,33 @@ def _signal_pill(label, big=False):
             f'{html_lib.escape(label)}</span>')
 
 
+def _fmt_bars(s):
+    """'7 bars' (≈1h 45m on 15-min bars), or '12+ open' if it hasn't flipped yet."""
+    if s.get("bars") is None:
+        return ""
+    mins = s["bars"] * 15
+    dur = f"{mins // 60}h {mins % 60:02d}m" if mins >= 60 else f"{mins}m"
+    if s.get("open") and s["bars"] == 0:
+        return '<span class="bars open" title="Fired on the latest bar">new</span>'
+    if s.get("open"):
+        return (f'<span class="bars open" title="Not flipped yet — {s["bars"]} bars (≈{dur}) so far">'
+                f'{s["bars"]}+ open</span>')
+    return (f'<span class="bars" title="Flipped after {s["bars"]} bars (≈{dur})">'
+            f'{s["bars"]} bar{"s" if s["bars"] != 1 else ""}</span>')
+
+
 def _sig_row(s, state, scan_time=None):
-    """One signal line: time, name, label, strategy, price at signal, move since."""
+    """One signal line: time, name, label, strategy, price at signal, move since
+    (and, for history rows, how many bars until that strategy flipped)."""
     e = html_lib.escape
-    return (f'<div class="sig{" fresh" if s["time"] == scan_time else ""}" data-dir="{_direction(s["label"])}">'
+    hist = "bars" in s
+    return (f'<div class="sig{" h" if hist else ""}{" fresh" if s["time"] == scan_time else ""}" '
+            f'data-dir="{_direction(s["label"])}">'
             f'<span class="t">{e(fmt_time(s["time"]))}</span><span class="n">{e(s["name"])}</span>'
             f'{_signal_pill(s["label"])}<span class="flat st">{e(s["strategy"])}</span>'
             f'<span class="p">{_fmt_price(s["price"])}</span>'
-            f'<span class="since">{_since_html(s, _current_price(state, s["name"]))}</span></div>')
+            f'<span class="since">{_since_html(s, _current_price(state, s["name"]))}</span>'
+            f'{_fmt_bars(s) if hist else ""}</div>')
 
 
 def find_confluence(log):
@@ -820,13 +843,19 @@ def write_dashboard(state):
         day_sigs = [h for h in history if h["time"][:10] == day][::-1]
         n_b = sum(_direction(h["label"]) == "buy" for h in day_sigs)
         confs = hist_conf.get(day, [])
+        avg = []
+        for strat, short in (("SuperTrend", "ST"), ("ADX_DI", "ADX")):
+            closed = [h["bars"] for h in day_sigs if h["strategy"] == strat and not h.get("open")]
+            if closed:
+                avg.append(f"{short} {sum(closed) / len(closed):.1f}")
+        avg_txt = f" · avg bars to flip: {', '.join(avg)}" if avg else ""
         conf_line = ('<div class="confline"><span class="flat">Confirmed:</span> ' + " ".join(
             f'<span class="pill {"up" if c["dir"] == "buy" else "dn"}">{e(c["name"])} · '
             f'{c["dir"].upper()} {e(fmt_time(c["time"]))}</span>' for c in confs) + "</div>") if confs else ""
         hist_blocks.append(
             f'<details class="hday"{" open" if n == 0 else ""}><summary><b>{e(fmt_day(day))}</b>'
             f'<span class="flat">{len(day_sigs)} signals · {n_b} buy · {len(day_sigs) - n_b} sell · '
-            f'{len(confs)} confirmed</span></summary>{conf_line}'
+            f'{len(confs)} confirmed{avg_txt}</span></summary>{conf_line}'
             f'<div class="list">{"".join(_sig_row(h, state) for h in day_sigs)}</div></details>')
 
     # stock table, nearest-to-flip first
@@ -893,7 +922,9 @@ M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button>
 <div class="list">{sig_rows or '<div class="empty" style="border:0">No signals yet.</div>'}</div></section>
 <section id="history"><h2>Signal history <span class="count">last {HISTORY_DAYS} trading days</span></h2>
 <p class="hint">Every signal the two strategies gave, replayed bar by bar from 15-minute data and
-grouped by day — times are when each bar closed, prices are that bar's close.</p>
+grouped by day — times are when each bar closed, prices are that bar's close. "Bars" = how many
+15-minute bars the signal lasted before that strategy flipped (SuperTrend reversed / ADX left that side);
+"open" = not flipped yet.</p>
 <div class="tools" data-group="hist"><button class="chip on" data-f="all">All</button>
 <button class="chip" data-f="buy">Buy</button><button class="chip" data-f="sell">Sell</button></div>
 {"".join(hist_blocks) or '<div class="empty">No history yet — it fills in after the next scan.</div>'}</section>
@@ -1001,7 +1032,17 @@ def bar_signals(name, df, close, trend, condition):
     """Every signal the strategies gave, bar by bar, over the last HISTORY_DAYS
     trading days in `df` — the same state changes the live scan alerts on, but
     replayed on completed bars. "time" is the bar's close (start + 15 min),
-    i.e. when a scan would have caught it; "price" is that bar's close."""
+    i.e. when a scan would have caught it; "price" is that bar's close.
+    "bars" is how many 15-min bars the signal lasted before that strategy
+    turned (SuperTrend flipped back / ADX left that side); "open" means it
+    hasn't turned yet and "bars" counts the bars so far."""
+    st_side = trend.astype(np.int8)
+    adx_side = np.sign(condition).astype(np.int8)
+
+    def bars_to_flip(side, i):
+        changed = np.nonzero(side[i + 1:] != side[i])[0]
+        return (int(changed[0]) + 1, False) if len(changed) else (int(len(side) - 1 - i), True)
+
     dates = df.index.date
     days = sorted(set(dates))[-HISTORY_DAYS:]
     out = []
@@ -1021,8 +1062,11 @@ def bar_signals(name, df, close, trend, condition):
         if labels:
             bar = df.index[i]
             t = (bar + pd.Timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
-            out += [{"time": t, "strategy": strat, "name": name, "label": label,
-                     "price": float(close[i]), "bar": str(bar)} for strat, label in labels]
+            for strat, label in labels:
+                bars, still_open = bars_to_flip(st_side if strat == "SuperTrend" else adx_side, i)
+                out.append({"time": t, "strategy": strat, "name": name, "label": label,
+                            "price": float(close[i]), "bar": str(bar),
+                            "bars": bars, "open": still_open})
     return out
 
 
