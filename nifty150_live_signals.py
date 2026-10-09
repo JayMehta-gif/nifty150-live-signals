@@ -451,13 +451,16 @@ ADX_LABELS = {1.0: "BUY_STRONG", 0.5: "BUY", 0.0: "—", -0.5: "SELL", -1.0: "SE
 CONFLUENCE_DAYS = 5              # trading days of "both strategies agree" history shown
 
 DASHBOARD_CSS = """
-:root{--bg:#f4f5f7;--card:#fff;--fg:#111827;--muted:#6b7280;--line:#e5e7eb;--soft:#f9fafb;
+:root{--bg:#f4f5f7;--card:#fff;--fg:#111827;--muted:#6b7280;--line:#e5e7eb;--soft:#f9fafb;--hover:#f3f4f6;
 --up:#047857;--up-bg:#d1fae5;--up-line:#10b981;--dn:#b91c1c;--dn-bg:#fee2e2;--dn-line:#ef4444;
 --hl:#fef9c3;--accent:#2563eb;--warn:#92400e;--warn-bg:#fef3c7;--shadow:0 1px 2px rgba(0,0,0,.05)}
-@media (prefers-color-scheme:dark){:root{--bg:#0b0d12;--card:#141820;--fg:#e5e7eb;--muted:#9ca3af;
---line:#262b36;--soft:#10141b;--up:#34d399;--up-bg:#0f2e23;--up-line:#10b981;--dn:#f87171;
---dn-bg:#341416;--dn-line:#ef4444;--hl:#2f2a10;--accent:#60a5fa;--warn:#fcd34d;--warn-bg:#2b230b;
---shadow:none}}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--bg:#000;--card:#000;--fg:#f3f4f6;--muted:#8b919a;--line:#1f2125;--soft:#000;--hover:#0e0e10;
+--up:#34d399;--up-bg:#062b1d;--up-line:#10b981;--dn:#f87171;--dn-bg:#2f0b0d;--dn-line:#ef4444;
+--hl:#1f1b06;--accent:#60a5fa;--warn:#fcd34d;--warn-bg:#241c04;--shadow:none}}
+:root[data-theme="dark"]{color-scheme:dark;--bg:#000;--card:#000;--fg:#f3f4f6;--muted:#8b919a;--line:#1f2125;--soft:#000;--hover:#0e0e10;
+--up:#34d399;--up-bg:#062b1d;--up-line:#10b981;--dn:#f87171;--dn-bg:#2f0b0d;--dn-line:#ef4444;
+--hl:#1f1b06;--accent:#60a5fa;--warn:#fcd34d;--warn-bg:#241c04;--shadow:none}
+:root[data-theme="light"]{color-scheme:light}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);
 font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
@@ -466,6 +469,11 @@ main{max-width:1080px;margin:0 auto;padding:20px 16px 32px}
 header{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-end;gap:10px}
 h1{font-size:20px;margin:0;letter-spacing:-.01em}
 .sub{color:var(--muted);font-size:12px}
+.hdr-r{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.theme{display:inline-flex;padding:2px;border:1px solid var(--line);border-radius:999px;background:var(--card)}
+.theme button{border:0;background:none;color:var(--muted);font:inherit;font-size:12px;
+padding:4px 10px;border-radius:999px;cursor:pointer}
+.theme button[aria-pressed="true"]{background:var(--fg);color:var(--bg)}
 .status{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;
 font-size:12px;font-weight:600;background:var(--card);border:1px solid var(--line)}
 .status i{width:8px;height:8px;border-radius:50%;background:var(--up-line)}
@@ -526,7 +534,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--mute
 user-select:none;position:sticky;top:0;background:var(--soft);z-index:1}
 th[data-k]:hover{color:var(--fg)}th.sorted::after{content:" ↑"}th.sorted.desc::after{content:" ↓"}
 .num{text-align:right}
-tbody tr:hover td{background:var(--soft)}
+tbody tr:hover td{background:var(--hover)}
 tr.fresh td{background:var(--hl)}
 tr:last-child td{border-bottom:0}
 .foot{color:var(--muted);font-size:12px;margin-top:22px;line-height:1.6}
@@ -537,6 +545,13 @@ th,td{padding:8px 9px}}
 """
 
 DASHBOARD_JS = """
+const tbs=[...document.querySelectorAll('.theme button')];
+function setTheme(t){if(t==='auto')delete document.documentElement.dataset.theme;
+ else document.documentElement.dataset.theme=t;
+ tbs.forEach(b=>b.setAttribute('aria-pressed',b.dataset.t===t));
+ try{t==='auto'?localStorage.removeItem('theme'):localStorage.setItem('theme',t);}catch(e){}}
+let cur='auto';try{cur=localStorage.getItem('theme')||'auto';}catch(e){}
+setTheme(cur);tbs.forEach(b=>b.onclick=()=>setTheme(b.dataset.t));
 const scanned=new Date(document.body.dataset.scanned),st=document.getElementById('status');
 const ageMin=(Date.now()-scanned)/60000;
 if(!isNaN(ageMin)){if(ageMin<=25){st.classList.add('live');st.lastChild.textContent=' Live · updated '+
@@ -742,12 +757,16 @@ def write_dashboard(state):
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="300">
 <meta name="color-scheme" content="light dark">
+<script>try{{const t=localStorage.getItem('theme');if(t==='light'||t==='dark')
+document.documentElement.dataset.theme=t;}}catch(e){{}}</script>
 <title>Nifty150 Live Signals</title><style>{DASHBOARD_CSS}</style></head>
 <body data-scanned="{e(scanned_iso)}"><main>
 <header><div><h1>Nifty150 Live Signals</h1>
 <div class="sub">SuperTrend ({ATR_PERIOD}×{MULTIPLIER:g}) + ADX DI · Nifty 100 + Midcap 50 ·
 {meta.get("checked", "—")}/{meta.get("total", "—")} stocks · last scan {e(scan_time or "—")} IST</div></div>
-<span class="status" id="status"><i></i> Waiting for first scan</span></header>
+<div class="hdr-r"><div class="theme" role="group" aria-label="Theme">
+<button data-t="auto">Auto</button><button data-t="light">Light</button><button data-t="dark">Dark</button></div>
+<span class="status" id="status"><i></i> Waiting for first scan</span></div></header>
 <div class="tiles">{tiles}</div>
 <section><h2>Both strategies agree <span class="count">{e(latest_day or "")}</span></h2>
 <p class="hint">SuperTrend and ADX DI both fired the same direction on the same day
