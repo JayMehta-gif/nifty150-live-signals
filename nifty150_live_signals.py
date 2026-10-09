@@ -5,7 +5,7 @@ Standalone script — copy this single file to any machine with internet
 access and Python 3.9+, install requirements, and run it. It polls
 15-min bars during NSE market hours and pops a desktop notification the
 moment either strategy's signal FIRES on any Nifty150 stock, or on the
-NIFTY 50 / NIFTY 100 indices themselves (not on every bar — only on the
+NIFTY 50 / NIFTY 100 / BANK NIFTY indices themselves (not on every bar — only on the
 state change).
 
 Strategies (locked configs from prior backtests):
@@ -199,6 +199,7 @@ NSE_INDEX_URLS = {
 INDEX_TICKERS = {
     "NIFTY 50": "^NSEI",
     "NIFTY 100": "^CNX100",
+    "BANK NIFTY": "^NSEBANK",
 }
 
 
@@ -939,7 +940,7 @@ def evaluate(name, df, prev):
     # % change vs. the previous session's last close (for the dashboard)
     dates = df.index.date
     prev_session = c[dates < dates[-1]]
-    day_chg_pct = ((last_close / prev_session[-1] - 1) * 100.0
+    day_chg_pct = (float((last_close / prev_session[-1] - 1) * 100.0)
                    if len(prev_session) and prev_session[-1] else None)
 
     new_state = {"st_trend": st_trend, "adx_cond": adx_cond, "last_ts": last_ts,
@@ -964,7 +965,7 @@ def build_scan_order(universe, state):
 
 
 def scan_indices(state):
-    """Same strategies on the index series themselves (NIFTY 50 / NIFTY 100)."""
+    """Same strategies on the index series themselves (NIFTY 50 / 100 / BANK)."""
     fired = []
     for name, yf_ticker in INDEX_TICKERS.items():
         key = INDEX_STATE_PREFIX + name
