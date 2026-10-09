@@ -40,11 +40,15 @@ jobs:
       - run: pip install -r requirements.txt
 
       # signal_state.json carries each stock's last state between runs, so a
-      # signal only alerts when it changes. Every run saves a new cache entry;
+      # signal only alerts when it changes; bars_cache.pkl holds the 15-min bar
+      # history so only the first scan of a day downloads 15 days and later
+      # scans fetch just today's bars. Every run saves a new cache entry;
       # restore-keys picks up the most recent one.
       - uses: actions/cache@v4
         with:
-          path: signal_state.json
+          path: |
+            signal_state.json
+            bars_cache.pkl
           key: signal-state-${{ github.run_id }}
           restore-keys: signal-state-
 

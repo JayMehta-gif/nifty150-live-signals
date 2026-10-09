@@ -156,6 +156,7 @@ WATCHLIST_DELAY = 2   # seconds between watchlist symbols (still paced, just tig
 IST = ZoneInfo("Asia/Kolkata")
 STATE_FILE = Path(__file__).parent / "signal_state.json"
 POLL_SECONDS = 15 * 60  # re-scan every 15 min, matching the bar size
+FETCH_PERIOD = "15d"    # 15-min history per fetch: 10 sessions replayed + ~5 of indicator warm-up
 
 ATR_PERIOD = 14
 MULTIPLIER = 3.0
@@ -342,22 +343,67 @@ class RateLimited(Exception):
     pass
 
 
+BARS_CACHE_FILE = Path(__file__).parent / "bars_cache.pkl"
+BARS_CACHE = None  # {yf_ticker: DataFrame}, loaded on first use, saved after each scan
+
+
+def load_bars_cache():
+    global BARS_CACHE
+    if BARS_CACHE is None:
+        BARS_CACHE = {}
+        if BARS_CACHE_FILE.exists():
+            try:
+                BARS_CACHE = pd.read_pickle(BARS_CACHE_FILE)
+            except Exception as e:
+                print(f"[warn] bar cache unreadable ({e}); starting fresh")
+    return BARS_CACHE
+
+
+def save_bars_cache():
+    if BARS_CACHE is not None:
+        pd.to_pickle(BARS_CACHE, BARS_CACHE_FILE)
+
+
 def fetch_15m(symbol, yf_ticker=None):
-    """Fetch 15-min bars with exponential-backoff retry on rate limiting.
-    `yf_ticker` overrides the "<symbol>.NS" lookup (e.g. "^NSEI" for an index)."""
+    """15-min bars for the last ~15 sessions. Downloads the full FETCH_PERIOD
+    only on the first fetch of the day (which also picks up any split/bonus
+    adjustment Yahoo made to older bars); later scans that day download just
+    today's bars and merge them into the cached history. `yf_ticker`
+    overrides the "<symbol>.NS" lookup (e.g. "^NSEI" for an index)."""
     yf_ticker = yf_ticker or f"{symbol}.NS"
+    cache = load_bars_cache()
+    cached = cache.get(yf_ticker)
+    today = datetime.now(IST).date()
+    fresh_today = cached is not None and len(cached) and cached.attrs.get("full_fetch") == str(today)
+    df = _download(symbol, yf_ticker, "1d" if fresh_today else FETCH_PERIOD)
+    if fresh_today:
+        if df is None or df.empty:
+            return cached
+        df = pd.concat([cached, df])
+        df = df[~df.index.duplicated(keep="last")].sort_index()
+    elif df is None:
+        return cached
+    keep = sorted(set(df.index.date))[-15:]
+    df = df[np.isin(df.index.date, keep)].copy()
+    df.attrs["full_fetch"] = str(today)  # set last: attrs don't reliably survive concat/slicing
+    cache[yf_ticker] = df
+    return df
+
+
+def _download(symbol, yf_ticker, period):
+    """One Yahoo download with exponential-backoff retry on rate limiting."""
     last_err = None
     for attempt in range(RETRY_MAX):
         try:
             ticker = yf.Ticker(yf_ticker, session=SESSION) if SESSION else yf.Ticker(yf_ticker)
-            df = ticker.history(period="10d", interval="15m")
+            df = ticker.history(period=period, interval="15m")
             if df.empty:
                 return None
             df = df.rename(columns=str.lower)
             if df.index.tz is not None:
                 df.index = df.index.tz_convert(IST)
             df = df.between_time("09:15", "15:30")
-            return df.dropna(subset=["open", "close"])
+            return df.dropna(subset=["open", "close"])[["open", "high", "low", "close", "volume"]]
         except Exception as e:
             msg = str(e).lower()
             is_rate_limit = "rate" in msg or "429" in msg or "too many requests" in msg
@@ -539,6 +585,9 @@ font-weight:600;padding:5px 10px;border-radius:7px;cursor:pointer;white-space:no
 .tb input[type=search]{flex:1 1 180px;min-width:140px;height:32px;padding:0 11px;border:1px solid var(--line);
 border-radius:9px;background:var(--panel);color:var(--fg);font:inherit;font-size:13px}
 .tb input:focus{outline:2px solid var(--accent);outline-offset:-1px}
+.sel{height:32px;padding:0 30px 0 11px;border:1px solid var(--line);border-radius:9px;background:var(--panel);
+color:var(--fg);font:inherit;font-size:13px;font-weight:600;cursor:pointer}
+.sel:focus{outline:2px solid var(--accent);outline-offset:-1px}
 .chk{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--muted);
 cursor:pointer;user-select:none}.chk input{accent-color:var(--accent)}
 .daysum{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12px;color:var(--muted);margin:2px 0 10px}
@@ -563,6 +612,7 @@ tr.fresh td{background:var(--hl)}
 tr.grp td{background:var(--head);font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;
 letter-spacing:.04em;padding:7px 12px}
 .foot{font-size:12px;color:var(--faint);padding:14px 0 0;border-top:1px solid var(--line);line-height:1.6}
+@media (max-width:1100px){.hide-md{display:none}}
 @media (max-width:980px){.idx{grid-template-columns:repeat(3,1fr)}}
 @media (max-width:700px){.wrap{padding:0 14px}.brand .sub{display:none}
 .idx{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;margin:0 -14px 20px;padding:0 14px 4px}
@@ -604,12 +654,34 @@ function filterer(tbodySel,countSel){const rows=$$(tbodySel+' tr[data-sym]'),f={
 const VIEWS={all:()=>true,aligned:d=>(d.st==='1'&&+d.adx>0)||(d.st==='-1'&&+d.adx<0),near:d=>+d.dist<=NEAR,
  long:d=>d.st==='1',short:d=>d.st==='-1',abuy:d=>+d.adx>0,asell:d=>+d.adx<0};
 const live=filterer('#t-live tbody');seg($('#f-live-dir'),v=>live.set('dir',v));
-const past=filterer('#t-past tbody','#c-past');
-seg($('#f-past-day'),v=>{past.set('day',v);$$('.daysum').forEach(x=>x.style.display=x.dataset.day===v?'':'none')});
-seg($('#f-past-dir'),v=>past.set('dir',v));seg($('#f-past-strat'),v=>past.set('strat',v));
-$('#f-past-conf').onchange=e=>past.set('conf',e.target.checked);
-$('#f-past-q').oninput=e=>past.set('q',e.target.value.trim().toUpperCase());
-const fb=$('#f-past-day button');if(fb)fb.click();
+/* past signals: rows come from PAST (compact JSON) and are drawn per selected day.
+   [time, name, label, strategy, price, exit, move, bars, open, confirmed, max gain, max drawdown] */
+const PT=$('#t-past tbody'),pf={day:'',dir:'all',strat:'all',conf:false,q:''};let pk='t',pa=false;
+const esc=x=>String(x).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fp=v=>v==null?'—':v.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const tg=l=>'<span class="tag '+(l.includes('SELL')?'dn':'up')+'">'+l.replace('_',' ')+'</span>';
+const pc=v=>v==null?'<span class="fa">—</span>':Math.abs(v)<0.005?'<span class="mu">0.00%</span>':
+ '<span class="'+(v>0?'up':'dn')+'">'+(v>0?'+':'')+v.toFixed(2)+'%</span>';
+const t12=t=>{let[h,m]=t.slice(11,16).split(':').map(Number);const ap=h>=12?'PM':'AM';return(h%12||12)+':'+String(m).padStart(2,'0')+' '+ap};
+const bt=(b,o)=>b==null?'—':o?(b===0?'<span class="tag ok">new</span>':'<span class="mu">'+b+'+</span>'):b;
+function renderPast(){const rows=PAST.filter(r=>r[0].startsWith(pf.day)&&(pf.dir==='all'||(pf.dir==='sell')===r[2].includes('SELL'))
+ &&(pf.strat==='all'||r[3]===pf.strat)&&(!pf.conf||r[9])&&r[1].includes(pf.q));
+ const i={t:0,sym:1,mv:6,bars:7,mfe:10,mae:11}[pk];rows.sort((a,b)=>{const x=a[i],y=b[i];
+  const v=typeof x==='string'?x.localeCompare(y):(x??-999)-(y??-999);return pa?v:-v});
+ PT.innerHTML=rows.map(r=>'<tr><td class="mu">'+t12(r[0])+'</td><td class="sym">'+esc(r[1])+(r[9]?' <span class="tag ok">✓</span>':'')+
+  '</td><td>'+tg(r[2])+'</td><td class="mu hide-md">'+(r[3]==='SuperTrend'?'SuperTrend':'ADX DI')+'</td><td class="r hide-sm">'+fp(r[4])+
+  '</td><td class="r hide-md">'+(r[8]?'<span class="fa">open</span>':fp(r[5]))+'</td><td class="r">'+pc(r[6])+'</td><td class="r">'+pc(r[10])+'</td><td class="r hide-sm">'+pc(r[11])+
+  '</td><td class="r">'+bt(r[7],r[8])+'</td></tr>').join('')
+  ||'<tr><td colspan="10" class="empty">No signals match these filters.</td></tr>';
+ $('#c-past').textContent=rows.length+' shown';}
+$$('#t-past th[data-k]').forEach(th=>th.onclick=()=>{const k=th.dataset.k;pa=k===pk?!pa:th.dataset.asc==='1';pk=k;
+ $$('#t-past th').forEach(x=>x.classList.remove('sorted','desc'));th.classList.add('sorted');if(!pa)th.classList.add('desc');renderPast()});
+const daySel=$('#f-past-day');
+daySel.onchange=()=>{pf.day=daySel.value;$$('.daysum').forEach(x=>x.style.display=x.dataset.day===pf.day?'':'none');renderPast()};
+seg($('#f-past-dir'),v=>{pf.dir=v;renderPast()});seg($('#f-past-strat'),v=>{pf.strat=v;renderPast()});
+$('#f-past-conf').onchange=e=>{pf.conf=e.target.checked;renderPast()};
+$('#f-past-q').oninput=e=>{pf.q=e.target.value.trim().toUpperCase();renderPast()};
+daySel.onchange();
 const stk=filterer('#t-stocks tbody','#c-stocks');seg($('#f-stk-view'),v=>stk.set('view',v));
 $('#f-stk-q').oninput=e=>stk.set('q',e.target.value.trim().toUpperCase());stk.run();
 /* sortable tables */
@@ -736,43 +808,31 @@ def find_confluence(signals, days=None):
     return {d: by_day[d] for d in (days_sorted[:days] if days else days_sorted)}
 
 
-def _slot_counter(signals):
-    """Map a bar close-time to a running 15-min bar number across sessions, so
-    bars between two times can be counted across overnight gaps."""
-    days = sorted({t[:10] for s in signals for t in (s["time"], s.get("exit_time") or s["time"])})
-    index = {d: i for i, d in enumerate(days)}
-
-    def slot(t):
-        d = _ist(t)
-        return index.get(t[:10], 0) * SESSION_BARS + ((d.hour * 60 + d.minute) - 570) // 15
-    return slot
-
-
 def confirmed_trades(archive):
-    """Double confirmations treated as one trade: entered when the second
-    strategy confirms, exited when the first of the two flips. Skipped if the
-    first signal had already flipped before the second one arrived."""
-    slot = _slot_counter(archive)
-    trades = []
-    for day, entries in find_confluence(archive).items():
-        for c in entries:
-            first, second = sorted((c["st"], c["adx"]), key=lambda x: x["time"])
-            if not first.get("open", True) and first["exit_time"] <= second["time"]:
-                continue
-            exits = [x for x in (first, second) if not x.get("open", True)]
-            ex = min(exits, key=lambda x: x["exit_time"]) if exits else None
-            trades.append({"name": c["name"], "label": "BUY" if c["dir"] == "buy" else "SELL",
-                           "time": second["time"], "price": second["price"], "open": ex is None,
-                           "exit_price": ex["exit_price"] if ex else None,
-                           "exit_time": ex["exit_time"] if ex else None,
-                           "bars": slot(ex["exit_time"]) - slot(second["time"]) if ex else None})
-    return trades
+    """Double confirmations as trades (enter on the 2nd signal, exit on the 1st
+    flip) — built bar-exactly in bar_signals() as strategy "CONFIRMED"."""
+    return [h for h in archive if h["strategy"] == "CONFIRMED"]
+
+
+def strategy_signals(archive):
+    """Archive minus the derived CONFIRMED trades: the raw strategy signals."""
+    return [h for h in archive if h["strategy"] != "CONFIRMED"]
+
+
+def _match_replay(archive, name, strategies, direction, day, upto=None):
+    """Latest replayed signal for a stock on a day (to attach max gain/drawdown
+    to a live alert or a live double confirmation)."""
+    hits = [h for h in archive if h["name"] == name and h["strategy"] in strategies
+            and _direction(h["label"]) == direction and h["time"][:10] == day
+            and (upto is None or h["time"] <= upto)]
+    return max(hits, key=lambda h: h["time"]) if hits else None
 
 
 def accuracy_stats(signals, state):
     n = len(signals)
     closed, live = [], []
     bars = []
+    mfe, mae = [], []
     for s in signals:
         mv, is_closed = outcome(s, _current_price(state, s["name"]))
         if mv is None:
@@ -780,8 +840,11 @@ def accuracy_stats(signals, state):
         (closed if is_closed else live).append(mv)
         if is_closed and s.get("bars") is not None:
             bars.append(s["bars"])
+        if is_closed and s.get("mfe") is not None:
+            mfe.append(s["mfe"])
+            mae.append(s["mae"])
     med = lambda xs: float(np.median(xs)) if xs else None  # noqa: E731
-    return {"n": n, "closed": len(closed), "open": len(live),
+    return {"n": n, "closed": len(closed), "open": len(live), "mfe": med(mfe), "mae": med(mae),
             "win": (sum(m > 0 for m in closed) / len(closed) * 100) if closed else None,
             "bars": med(bars), "move": med(closed), "avg": float(np.mean(closed)) if closed else None,
             "open_move": med(live)}
@@ -849,41 +912,48 @@ def write_dashboard(state):
         mv, _ = outcome({**s, "open": True}, _current_price(state, s["name"]))
         return mv
 
+    def excursion_cells(h):
+        if not h:
+            return '<td class="r"><span class="fa">—</span></td><td class="r hide-sm"><span class="fa">—</span></td>'
+        return f'<td class="r">{_pct(h.get("mfe"))}</td><td class="r hide-sm">{_pct(h.get("mae"))}</td>'
+
     conf_rows = "".join(
         f'<tr data-sym="{e(c["name"])}"><td class="sym">{e(c["name"])}</td>'
         f'<td>{_tag("CONFIRMED " + c["dir"].upper())}</td>'
         f'<td>{_tag(c["st"]["label"])} <span class="mu">{e(fmt_time(c["st"]["time"]))}</span></td>'
         f'<td>{_tag(c["adx"]["label"])} <span class="mu">{e(fmt_time(c["adx"]["time"]))}</span></td>'
         f'<td class="r">{_fmt_price(c["price"])}</td><td class="r">{_fmt_price(_current_price(state, c["name"]))}</td>'
-        f'<td class="r">{_pct(now_move({"label": c["dir"].upper(), "price": c["price"], "name": c["name"]}))}</td></tr>'
+        f'<td class="r">{_pct(now_move({"label": c["dir"].upper(), "price": c["price"], "name": c["name"]}))}</td>'
+        f'{excursion_cells(_match_replay(archive, c["name"], ("CONFIRMED",), c["dir"], latest_day))}</tr>'
         for c in conf_today)
     live_rows = "".join(
         f'<tr data-sym="{e(s["name"])}" data-dir="{_direction(s["label"])}"'
         f'{" class=fresh" if s["time"] == scan_time else ""}>'
         f'<td class="mu">{e(fmt_time(s["time"]))}</td><td class="sym">{e(s["name"])}</td><td>{_tag(s["label"])}</td>'
         f'<td class="mu hide-sm">{_strat_name(s["strategy"])}</td><td class="r">{_fmt_price(s["price"])}</td>'
-        f'<td class="r">{_pct(now_move(s))}</td></tr>' for s in today)
+        f'<td class="r">{_pct(now_move(s))}</td>'
+        f'{excursion_cells(_match_replay(archive, s["name"], (s["strategy"],), _direction(s["label"]), s["time"][:10], s["time"]))}</tr>'
+        for s in today)
 
     # ── past signals (replayed, last HISTORY_DAYS sessions)
     days_all = sorted({h["time"][:10] for h in archive}, reverse=True)
     past_days = days_all[:HISTORY_DAYS]
-    past = sorted((h for h in archive if h["time"][:10] in past_days), key=lambda h: h["time"], reverse=True)
-    conf_keys = {(d, c["name"]) for d, cs in find_confluence(past).items() for c in cs}
-    past_rows = []
+    past = sorted((h for h in strategy_signals(archive) if h["time"][:10] in past_days),
+                  key=lambda h: h["time"], reverse=True)
+    conf_keys = {(h["time"][:10], h["name"]) for h in confirmed_trades(archive)}
+    # rows go to the page as compact JSON and are drawn in the browser one day
+    # at a time — 10 days of HTML rows would make the (encrypted) page ~1.5 MB
+    past_data = []
     for h in past:
         mv, closed = outcome(h, _current_price(state, h["name"]))
-        conf = (h["time"][:10], h["name"]) in conf_keys
-        past_rows.append(
-            f'<tr data-sym="{e(h["name"])}" data-day="{h["time"][:10]}" data-dir="{_direction(h["label"])}" '
-            f'data-strat="{h["strategy"]}" data-conf="{int(conf)}" data-t="{h["time"]}" '
-            f'data-mv="{mv if mv is not None else -999}" data-bars="{h.get("bars") or 0}">'
-            f'<td class="mu">{e(fmt_time(h["time"]))}</td>'
-            f'<td class="sym">{e(h["name"])}{" " + _tag("✓", "ok") if conf else ""}</td>'
-            f'<td>{_tag(h["label"])}</td><td class="mu hide-sm">{_strat_name(h["strategy"])}</td>'
-            f'<td class="r hide-sm">{_fmt_price(h["price"])}</td>'
-            f'<td class="r hide-sm">{_fmt_price(h.get("exit_price")) if closed else "<span class=fa>open</span>"}</td>'
-            f'<td class="r">{_pct(mv)}</td><td class="r">{_bars_txt(h.get("bars"), not closed)}</td></tr>')
-    day_btns = "".join(f'<button data-f="{d}">{e(fmt_day(d))}</button>' for d in past_days)
+        past_data.append([h["time"], h["name"], h["label"], h["strategy"], round(h["price"], 2),
+                          round(h["exit_price"], 2) if closed and h.get("exit_price") else None,
+                          round(mv, 3) if mv is not None else None, h.get("bars"),
+                          0 if closed else 1, int((h["time"][:10], h["name"]) in conf_keys),
+                          h.get("mfe"), h.get("mae")])
+    past_json = json.dumps(past_data, separators=(",", ":")).replace("</", "<\\/")
+    per_day = {d: sum(1 for h in past if h["time"][:10] == d) for d in past_days}
+    day_opts = "".join(f'<option value="{d}">{e(fmt_day(d))} · {per_day[d]} signals</option>' for d in past_days)
     day_sums = []
     for d in past_days:
         ds = [h for h in past if h["time"][:10] == d]
@@ -896,6 +966,9 @@ def write_dashboard(state):
             parts.append(f"<span>median <b>{acc['bars']:.0f}</b> bars to flip</span>")
         if acc["win"] is not None:
             parts.append(f"<span>win rate <b>{acc['win']:.0f}%</b> ({acc['closed']} closed)</span>")
+        if acc["mfe"] is not None:
+            parts.append(f"<span>median max gain <b class=up>{acc['mfe']:+.2f}%</b> · "
+                         f"max drawdown <b class=dn>{acc['mae']:+.2f}%</b></span>")
         day_sums.append(f'<div class="daysum" data-day="{d}">{"".join(parts)}</div>')
 
     # ── accuracy (whole archive)
@@ -915,20 +988,21 @@ def write_dashboard(state):
         return (f'<tr><td>{_tag(tag_label)} <span class="mu">{e(label)}</span></td><td class="r">{a["n"]}</td>'
                 f'<td class="r hide-sm">{a["closed"]}</td><td>{win}</td>'
                 f'<td class="r">{bars}</td>'
-                f'<td class="r">{_pct(a["move"])}</td><td class="r hide-sm">{_pct(a["avg"])}</td>'
+                f'<td class="r">{_pct(a["move"])}</td><td class="r">{_pct(a["mfe"])}</td>'
+                f'<td class="r">{_pct(a["mae"])}</td><td class="r hide-sm">{_pct(a["avg"])}</td>'
                 f'<td class="r hide-sm">{a["open"]} · {_pct(a["open_move"])}</td></tr>')
 
     acc_rows = []
     for title, rows in groups:
-        acc_rows.append(f'<tr class="grp"><td colspan="8">{e(title)}</td></tr>')
+        acc_rows.append(f'<tr class="grp"><td colspan="10">{e(title)}</td></tr>')
         for lbl, strat, labels in rows:
             acc_rows.append(acc_row("", [h for h in archive if h["strategy"] == strat and h["label"] in labels], lbl))
         acc_rows.append(acc_row("", [h for h in archive if h["strategy"] == (
             "SuperTrend" if title == "SuperTrend" else "ADX_DI")], "ALL"))
-    acc_rows.append('<tr class="grp"><td colspan="8">Double confirmation (enter on 2nd signal, exit on 1st flip)</td></tr>')
+    acc_rows.append('<tr class="grp"><td colspan="10">Double confirmation (enter on 2nd signal, exit on 1st flip)</td></tr>')
     acc_rows.append(acc_row("", [t for t in trades if t["label"] == "BUY"], "CONFIRMED BUY"))
     acc_rows.append(acc_row("", [t for t in trades if t["label"] == "SELL"], "CONFIRMED SELL"))
-    overall = accuracy_stats(archive, state)
+    overall = accuracy_stats(strategy_signals(archive), state)
     conf_all = accuracy_stats(trades, state)
     span = (f"{fmt_day(days_all[-1])} – {fmt_day(days_all[0])} · {len(days_all)} sessions"
             if days_all else "no data yet")
@@ -941,14 +1015,15 @@ def write_dashboard(state):
         f'<div class="s">moved in the signal\'s favour by its flip</div></div>'
         f'<div class="panel kpi"><div class="k">Median bars to flip</div><div class="v">'
         f'{fmt_n(overall["bars"], ".0f")}</div>'
-        f'<div class="s">≈ {fmt_n(overall["bars"] * 15 / 60 if overall["bars"] is not None else None, ".1f", " h")} of trading</div></div>'
+        f'<div class="s">≈ {fmt_n(overall["bars"] * 15 / 60 if overall["bars"] is not None else None, ".1f", " h")} of trading · '
+        f'max gain {_pct(overall["mfe"])} · drawdown {_pct(overall["mae"])}</div></div>'
         f'<div class="panel kpi"><div class="k">Confirmed setups win rate</div><div class="v">'
         f'{fmt_n(conf_all["win"], ".0f", "%")}</div>'
         f'<div class="s">{conf_all["closed"]} closed · median {_pct(conf_all["move"])}</div></div>')
 
     # ── stocks
     last_sig = {}
-    for h in sorted(archive, key=lambda x: x["time"]):
+    for h in sorted(strategy_signals(archive), key=lambda x: x["time"]):
         last_sig[h["name"]] = h
     for s in log:
         if s["name"] not in last_sig or s["time"] > last_sig[s["name"]]["time"]:
@@ -962,6 +1037,7 @@ def write_dashboard(state):
         ls = last_sig.get(sym)
         dist_s = f"{dist:.2f}%" if dist is not None else "—"
         mv = outcome({**ls, "open": True}, info.get("last_close"))[0] if ls else None
+        max_txt = (f' · max {ls["mfe"]:+.2f}% / {ls["mae"]:+.2f}%' if ls and ls.get("mfe") is not None else "")
         stock_rows.append(
             f'<tr data-sym="{e(sym)}" data-st="{st}" data-adx="{adx}" data-dist="{dist if dist is not None else 999}" '
             f'data-chg="{chg if chg is not None else 0}" data-px="{info.get("last_close") or 0}" '
@@ -969,12 +1045,12 @@ def write_dashboard(state):
             f'<td class="sym">{e(sym)}</td><td class="r">{_fmt_price(info.get("last_close"))}</td>'
             f'<td class="r">{_pct(chg)}</td><td>{_st_tag(st)}</td><td>{_adx_tag(adx)}</td>'
             f'<td class="r">{dist_s}</td>'
-            f'<td>{(_tag(ls["label"]) + " " + _pct(mv) + "<div class=sm>" + e(fmt_stamp(ls["time"])) + "</div>") if ls else "<span class=fa>—</span>"}</td></tr>')
+            f'<td>{(_tag(ls["label"]) + " " + _pct(mv) + "<div class=sm>" + e(fmt_stamp(ls["time"])) + max_txt + "</div>") if ls else "<span class=fa>—</span>"}</td></tr>')
 
     def table(tid, head, rows, empty, sort=None):
         return (f'<div class="panel tw"><table id="{tid}"{f" data-sort={sort}" if sort else ""}><thead><tr>{head}</tr>'
                 f'</thead><tbody>{rows}<tr class="nores" style="display:{"none" if rows else ""}">'
-                f'<td colspan="9" class="empty">{empty}</td></tr></tbody></table></div>')
+                f'<td colspan="12" class="empty">{empty}</td></tr></tbody></table></div>')
 
     scanned_iso = f"{scan_time.replace(' ', 'T')}+05:30" if scan_time else ""
     sub = (f'{meta.get("checked")}/{meta.get("total")} stocks · {len(INDEX_TICKERS)} indices · '
@@ -1011,37 +1087,41 @@ stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
 <div class="kpis">{kpis}</div>
 <section><div class="sh"><h2>Double confirmations</h2><span class="meta">{e(fmt_day(latest_day)) if latest_day else ""}</span></div>
 <p class="note">SuperTrend and ADX DI gave the same signal on the same day — the latest signal of each counts.</p>
-{table("t-conf", '<th>Stock</th><th>Setup</th><th>SuperTrend</th><th>ADX DI</th><th class="r">At signal</th><th class="r">Now</th><th class="r">Move</th>',
+{table("t-conf", '<th>Stock</th><th>Setup</th><th>SuperTrend</th><th>ADX DI</th><th class="r">At signal</th><th class="r">Now</th><th class="r">Move</th><th class="r">Max gain</th><th class="r hide-sm">Max drawdown</th>',
        conf_rows, "No double confirmations today yet.")}</section>
 <section><div class="sh"><h2>Today's signals</h2><div class="seg" id="f-live-dir"><button class="on" data-f="all">All</button>
 <button data-f="buy">Buy</button><button data-f="sell">Sell</button></div></div>
-{table("t-live", '<th>Time</th><th>Stock</th><th>Signal</th><th class="hide-sm">Strategy</th><th class="r">Price</th><th class="r">Move</th>',
+{table("t-live", '<th>Time</th><th>Stock</th><th>Signal</th><th class="hide-sm">Strategy</th><th class="r">Price</th><th class="r">Move</th><th class="r">Max gain</th><th class="r hide-sm">Max drawdown</th>',
        live_rows, "No signals yet today — they appear here as each scan finds them.")}</section>
 </div>
 
 <div class="view" id="v-past">
 <div class="sh"><h2>Past signals</h2><span class="meta" id="c-past"></span></div>
-<p class="note">Every signal from the last {HISTORY_DAYS} sessions, replayed bar by bar from 15-minute data. Time = bar close;
+<p class="note">Every signal from the last {HISTORY_DAYS} sessions, replayed bar by bar from 15-minute data — pick a day
+below. Time = the 15-min candle the signal formed on (labelled by its start, like TradingView);
 <b>Move</b> = price change in the signal's favour up to its flip (or to now if still open); <b>Bars</b> = 15-min bars until
 that strategy flipped (SuperTrend reversed / ADX left that side). ✓ = part of a double confirmation that day.</p>
-<div class="tb"><div class="seg" id="f-past-day">{day_btns}</div>
+<div class="tb"><select class="sel" id="f-past-day" aria-label="Day">{day_opts or '<option value="">No data yet</option>'}</select>
 <div class="seg" id="f-past-dir"><button class="on" data-f="all">All</button><button data-f="buy">Buy</button><button data-f="sell">Sell</button></div>
 <div class="seg" id="f-past-strat"><button class="on" data-f="all">Both</button><button data-f="SuperTrend">SuperTrend</button><button data-f="ADX_DI">ADX DI</button></div>
 <label class="chk"><input type="checkbox" id="f-past-conf"> Confirmed only</label>
 <input type="search" id="f-past-q" placeholder="Search stock…" autocomplete="off"></div>
 {"".join(day_sums)}
-{table("t-past", '<th data-k="t" data-asc="0">Time</th><th data-k="sym" data-asc="1">Stock</th><th>Signal</th><th class="hide-sm">Strategy</th><th class="r hide-sm">Price</th><th class="r hide-sm">Exit</th><th class="r" data-k="mv" data-asc="0">Move</th><th class="r" data-k="bars" data-asc="1">Bars</th>',
-       "".join(past_rows), "No signals match these filters.", "t")}
+{table("t-past", '<th class="sorted desc" data-k="t" data-asc="0">Time</th><th data-k="sym" data-asc="1">Stock</th><th>Signal</th><th class="hide-md">Strategy</th><th class="r hide-sm">Price</th><th class="r hide-md">Exit</th><th class="r" data-k="mv" data-asc="0">Move</th><th class="r" data-k="mfe" data-asc="0">Max gain</th><th class="r hide-sm" data-k="mae" data-asc="1">Max drawdown</th><th class="r" data-k="bars" data-asc="1">Bars</th>',
+       "", "No signals match these filters.")}
+<script>const PAST={past_json};</script>
 </div>
 
 <div class="view" id="v-accuracy">
 <div class="sh"><h2>Accuracy tracker</h2><span class="meta">{e(span)}</span></div>
 <p class="note">A signal <b>wins</b> if price moved in its favour (up after a buy, down after a sell) by the bar where that
 strategy flipped. <b>Median bars</b> = 15-min bars until the flip; <b>Median move</b> = typical % move in the signal's favour at
-the flip. Open signals aren't scored — their current move is shown separately. Builds up to {ARCHIVE_KEEP_DAYS} days of history.</p>
+the flip; <b>Max gain</b> / <b>Max drawdown</b> = the furthest price went in the signal's favour / against it
+(candle highs and lows) before the flip. Open signals aren't scored — their current move is shown separately. Builds up to {ARCHIVE_KEEP_DAYS} days of history.</p>
 <div class="kpis">{acc_kpis}</div>
 <div class="panel tw"><table><thead><tr><th>Signal</th><th class="r">Signals</th><th class="r hide-sm">Closed</th>
-<th>Win rate</th><th class="r">Median bars</th><th class="r">Median move</th><th class="r hide-sm">Avg move</th>
+<th>Win rate</th><th class="r">Median bars</th><th class="r">Median move</th><th class="r">Median max gain</th>
+<th class="r">Median max drawdown</th><th class="r hide-sm">Avg move</th>
 <th class="r hide-sm">Open · now</th></tr></thead><tbody>{"".join(acc_rows)}</tbody></table></div>
 </div>
 
@@ -1139,8 +1219,8 @@ def evaluate(name, df, prev):
     return new_state, fired
 
 
-HISTORY_DAYS = 3         # trading days shown in the dashboard's "Past signals" tab
-REPLAY_DAYS = 7          # trading days replayed per scan (of the 10 fetched; 3 left as warm-up)
+HISTORY_DAYS = 10        # trading days selectable in the dashboard's "Past signals" tab
+REPLAY_DAYS = 10         # trading days replayed per scan (of the ~15 fetched; the rest is warm-up)
 ARCHIVE_KEY = "__ARCHIVE__"
 ARCHIVE_KEEP_DAYS = 30   # calendar days of replayed signals kept for the accuracy tracker
 
@@ -1148,21 +1228,48 @@ ARCHIVE_KEEP_DAYS = 30   # calendar days of replayed signals kept for the accura
 def bar_signals(name, df, close, trend, condition):
     """Every signal the strategies gave, bar by bar, over the last REPLAY_DAYS
     trading days in `df` — the same state changes the live scan alerts on, but
-    replayed on completed bars. "time" is the bar's close (start + 15 min),
-    i.e. when a scan would have caught it; "price" is that bar's close.
+    replayed on completed bars. "time" is the 15-min candle the signal formed
+    on, labelled by its start like TradingView (the 3:15 PM candle closes the
+    session at 3:30); "price" is that candle's close.
     "bars" is how many 15-min bars the signal lasted before that strategy
     turned (SuperTrend flipped back / ADX left that side); "open" means it
     hasn't turned yet and "bars" counts the bars so far. "exit_price" /
-    "exit_time" are the close and close-time of the bar where it turned."""
+    "exit_time" are the close and candle time of the bar where it turned.
+    "mfe" / "mae" are the maximum move in the signal's favour / against it
+    (from candle highs and lows) between the signal and its flip, or so far.
+
+    Double confirmations are added as strategy "CONFIRMED" entries: the latest
+    SuperTrend and ADX DI signal of a day agree in direction and the first is
+    still active when the second fires; the trade enters on the second signal
+    and exits when the first of the two flips."""
+    high = df["high"].to_numpy(dtype=np.float64)
+    low = df["low"].to_numpy(dtype=np.float64)
     st_side = trend.astype(np.int8)
     adx_side = np.sign(condition).astype(np.int8)
+    last = len(close) - 1
 
-    def bars_to_flip(side, i):
+    def flip_index(side, i):
         changed = np.nonzero(side[i + 1:] != side[i])[0]
-        return (int(changed[0]) + 1, False) if len(changed) else (int(len(side) - 1 - i), True)
+        return (i + 1 + int(changed[0]), False) if len(changed) else (last, True)
 
-    def close_time(j):
-        return (df.index[j] + pd.Timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
+    def candle(j):
+        return df.index[j].strftime("%Y-%m-%d %H:%M:%S")
+
+    def entry(i, end, still_open, strategy, label):
+        buy = "SELL" not in label
+        if end > i:
+            hi = (high[i + 1:end + 1].max() / close[i] - 1) * 100.0
+            lo = (low[i + 1:end + 1].min() / close[i] - 1) * 100.0
+            mfe, mae = (hi, lo) if buy else (-lo, -hi)
+        else:
+            mfe = mae = 0.0
+        return {"time": candle(i), "strategy": strategy, "name": name, "label": label,
+                "price": float(close[i]), "bar": str(df.index[i]),
+                "bars": int(end - i), "open": still_open,
+                "exit_price": None if still_open else float(close[end]),
+                "exit_time": None if still_open else candle(end),
+                "mfe": round(float(max(mfe, 0.0)), 3), "mae": round(float(min(mae, 0.0)), 3),
+                "_i": int(i), "_end": int(end)}
 
     dates = df.index.date
     days = sorted(set(dates))[-REPLAY_DAYS:]
@@ -1180,14 +1287,26 @@ def bar_signals(name, df, close, trend, condition):
             labels.append(("ADX_DI", "BUY_STRONG" if cur == 1.0 else "BUY"))
         elif cur in (-1.0, -0.5) and prv not in (-1.0, -0.5):
             labels.append(("ADX_DI", "SELL_STRONG" if cur == -1.0 else "SELL"))
-        if labels:
-            for strat, label in labels:
-                bars, still_open = bars_to_flip(st_side if strat == "SuperTrend" else adx_side, i)
-                out.append({"time": close_time(i), "strategy": strat, "name": name, "label": label,
-                            "price": float(close[i]), "bar": str(df.index[i]),
-                            "bars": bars, "open": still_open,
-                            "exit_price": None if still_open else float(close[i + bars]),
-                            "exit_time": None if still_open else close_time(i + bars)})
+        for strat, label in labels:
+            end, still_open = flip_index(st_side if strat == "SuperTrend" else adx_side, i)
+            out.append(entry(i, end, still_open, strat, label))
+
+    latest = {}
+    for sig in out:  # chronological, so the last one per day/strategy wins
+        latest.setdefault(sig["time"][:10], {})[sig["strategy"]] = sig
+    for day, by in latest.items():
+        st, adx = by.get("SuperTrend"), by.get("ADX_DI")
+        if not (st and adx) or ("SELL" in st["label"]) != ("SELL" in adx["label"]):
+            continue
+        first, second = sorted((st, adx), key=lambda x: x["_i"])
+        if not first["open"] and first["_end"] <= second["_i"]:
+            continue  # first had already flipped — not active together
+        closed_ends = [x["_end"] for x in (first, second) if not x["open"]]
+        end, still_open = (min(closed_ends), False) if closed_ends else (last, True)
+        out.append(entry(second["_i"], end, still_open, "CONFIRMED",
+                         "SELL" if "SELL" in st["label"] else "BUY"))
+    for sig in out:
+        del sig["_i"], sig["_end"]
     return out
 
 
@@ -1306,6 +1425,7 @@ def scan_once(per_symbol_delay=None):
                             "universe": universe}
 
     save_state(state)
+    save_bars_cache()
     write_dashboard(state)
     print(f"[{now_str}] checked {checked}/{len(universe)} stocks "
           f"+ {len(INDEX_TICKERS)} indices, {len(fired)} new signal(s)")
