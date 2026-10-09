@@ -448,77 +448,135 @@ SIGNAL_LOG_KEY = "__SIGNALS__"   # recent fired signals, kept in the state file
 SIGNAL_LOG_MAX = 300
 SCAN_META_KEY = "__SCAN__"       # last scan time / coverage
 ADX_LABELS = {1.0: "BUY_STRONG", 0.5: "BUY", 0.0: "—", -0.5: "SELL", -1.0: "SELL_STRONG"}
+CONFLUENCE_DAYS = 5              # trading days of "both strategies agree" history shown
 
 DASHBOARD_CSS = """
-:root{--bg:#f6f7f9;--card:#fff;--fg:#14171c;--muted:#626a75;--line:#e3e6ea;
---up:#0f8a4a;--up-bg:#e3f5ea;--dn:#c8323a;--dn-bg:#fbe7e8;--hl:#fff6d6;--accent:#2563eb}
-@media (prefers-color-scheme:dark){:root{--bg:#0e1116;--card:#161a21;--fg:#e7e9ec;
---muted:#9aa3ae;--line:#272c35;--up:#4ade80;--up-bg:#12301f;--dn:#f87171;--dn-bg:#3a1719;
---hl:#3a3212;--accent:#60a5fa}}
+:root{--bg:#f4f5f7;--card:#fff;--fg:#111827;--muted:#6b7280;--line:#e5e7eb;--soft:#f9fafb;
+--up:#047857;--up-bg:#d1fae5;--up-line:#10b981;--dn:#b91c1c;--dn-bg:#fee2e2;--dn-line:#ef4444;
+--hl:#fef9c3;--accent:#2563eb;--warn:#92400e;--warn-bg:#fef3c7;--shadow:0 1px 2px rgba(0,0,0,.05)}
+@media (prefers-color-scheme:dark){:root{--bg:#0b0d12;--card:#141820;--fg:#e5e7eb;--muted:#9ca3af;
+--line:#262b36;--soft:#10141b;--up:#34d399;--up-bg:#0f2e23;--up-line:#10b981;--dn:#f87171;
+--dn-bg:#341416;--dn-line:#ef4444;--hl:#2f2a10;--accent:#60a5fa;--warn:#fcd34d;--warn-bg:#2b230b;
+--shadow:none}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);
-font:14px/1.45 -apple-system,"Segoe UI",Roboto,Arial,sans-serif}
-main{max-width:1000px;margin:0 auto;padding:16px}
-h1{font-size:18px;margin:0}
-h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:22px 0 8px}
-.meta{color:var(--muted);font-size:12px;margin-top:4px}
-.stale{display:none;margin-top:8px;padding:8px 10px;border-radius:8px;background:var(--hl);font-size:12px}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px}
-.card .name{font-weight:600}.card .px{font-size:20px;font-weight:600;margin:4px 0}
-.pill{display:inline-block;padding:1px 7px;border-radius:999px;font-size:11px;font-weight:600;white-space:nowrap}
-.up{color:var(--up);background:var(--up-bg)}.dn{color:var(--dn);background:var(--dn-bg)}
+font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
+font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
+main{max-width:1080px;margin:0 auto;padding:20px 16px 32px}
+header{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-end;gap:10px}
+h1{font-size:20px;margin:0;letter-spacing:-.01em}
+.sub{color:var(--muted);font-size:12px}
+.status{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;
+font-size:12px;font-weight:600;background:var(--card);border:1px solid var(--line)}
+.status i{width:8px;height:8px;border-radius:50%;background:var(--up-line)}
+.status.live i{animation:pulse 2s infinite}.status.old{color:var(--warn);background:var(--warn-bg);border-color:transparent}
+.status.old i{background:var(--warn)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+section{margin-top:26px}
+h2{display:flex;align-items:center;gap:8px;font-size:15px;margin:0 0 10px}
+h2 .count{font-size:12px;color:var(--muted);font-weight:500}
+.hint{color:var(--muted);font-size:12px;margin:-6px 0 10px}
+.tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:16px}
+.tile{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;box-shadow:var(--shadow)}
+.tile .k{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+.tile .v{font-size:24px;font-weight:700;margin:2px 0}
+.tile .s{font-size:12px;color:var(--muted)}
+.bar{display:flex;height:6px;border-radius:3px;overflow:hidden;background:var(--line);margin-top:8px}
+.bar .u{background:var(--up-line)}.bar .d{background:var(--dn-line)}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}
+.card{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--line);
+border-radius:12px;padding:12px 14px;box-shadow:var(--shadow)}
+.card.up{border-left-color:var(--up-line)}.card.dn{border-left-color:var(--dn-line)}
+.card .top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.card .name{font-weight:700;font-size:15px}
+.card .px{font-size:22px;font-weight:700;margin:2px 0 6px}
+.card .row{display:flex;justify-content:space-between;align-items:center;font-size:12px;
+color:var(--muted);padding:3px 0}
+.card .row>span:first-child{white-space:nowrap}.card .row>span:last-child{text-align:right}
+.cards.wide{grid-template-columns:repeat(auto-fill,minmax(290px,1fr))}
+.card.fresh{background:linear-gradient(var(--hl),var(--hl)) padding-box}
+.pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;
+letter-spacing:.02em;white-space:nowrap}
+.pill.up{color:var(--up);background:var(--up-bg)}.pill.dn{color:var(--dn);background:var(--dn-bg)}
+.pill.big{font-size:12px;padding:3px 10px}
 .flat{color:var(--muted)}
-.sig{display:flex;gap:10px;align-items:baseline;padding:8px 12px;border-bottom:1px solid var(--line)}
-.sig:last-child{border-bottom:0}.sig .t{color:var(--muted);font-size:12px;min-width:44px}
-.sig .n{font-weight:600}.sig .p{margin-left:auto;font-variant-numeric:tabular-nums}
-.list{background:var(--card);border:1px solid var(--line);border-radius:10px}
-.empty{padding:12px;color:var(--muted)}
-.tools{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
-.tools input{flex:1 1 160px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;
+.chg.up{color:var(--up)}.chg.dn{color:var(--dn)}
+.empty{background:var(--card);border:1px dashed var(--line);border-radius:12px;padding:16px;
+color:var(--muted);text-align:center}
+details{margin-top:10px}summary{cursor:pointer;color:var(--accent);font-size:13px}
+details .day{font-size:12px;color:var(--muted);margin:12px 0 6px;font-weight:600}
+.list{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:var(--shadow)}
+.sig{display:grid;grid-template-columns:48px minmax(90px,150px) 110px 1fr auto;gap:10px;
+align-items:center;padding:9px 14px;border-bottom:1px solid var(--line)}
+.sig:last-child{border-bottom:0}.sig .t{color:var(--muted);font-size:12px}
+.sig .n{font-weight:600;overflow:hidden;text-overflow:ellipsis}.sig .pill{justify-self:start}.sig .p{text-align:right}
+.sig.fresh{background:var(--hl)}
+.tools{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+.tools input{flex:1 1 180px;padding:8px 12px;border:1px solid var(--line);border-radius:10px;
 background:var(--card);color:var(--fg);font:inherit}
-.chip{padding:6px 10px;border:1px solid var(--line);border-radius:999px;background:var(--card);
+.tools input:focus{outline:2px solid var(--accent);outline-offset:-1px}
+.chip{padding:6px 12px;border:1px solid var(--line);border-radius:999px;background:var(--card);
 color:var(--fg);font:inherit;font-size:12px;cursor:pointer}
-.chip.on{border-color:var(--accent);color:var(--accent)}
-.tw{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:10px}
-table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
-th,td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
-th{font-size:12px;color:var(--muted);cursor:pointer;user-select:none;position:sticky;top:0;background:var(--card)}
-th.num,td.num{text-align:right}
+.chip.on{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+.tw{overflow:auto;max-height:70vh;background:var(--card);border:1px solid var(--line);
+border-radius:12px;box-shadow:var(--shadow)}
+table{border-collapse:collapse;width:100%}
+th,td{padding:8px 12px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+th{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);cursor:pointer;
+user-select:none;position:sticky;top:0;background:var(--soft);z-index:1}
+th[data-k]:hover{color:var(--fg)}th.sorted::after{content:" ↑"}th.sorted.desc::after{content:" ↓"}
+.num{text-align:right}
+tbody tr:hover td{background:var(--soft)}
 tr.fresh td{background:var(--hl)}
 tr:last-child td{border-bottom:0}
-.foot{color:var(--muted);font-size:12px;margin:18px 0 8px}
-@media (max-width:600px){.hide-sm{display:none}main{padding:12px}}
+.foot{color:var(--muted);font-size:12px;margin-top:22px;line-height:1.6}
+@media (max-width:760px){.tiles{grid-template-columns:repeat(2,1fr)}}
+@media (max-width:600px){main{padding:14px 12px 28px}.hide-sm{display:none}
+.sig{grid-template-columns:40px 1fr auto auto}.sig .st{display:none}
+th,td{padding:8px 9px}}
 """
 
 DASHBOARD_JS = """
-const scanned=new Date(document.body.dataset.scanned);
+const scanned=new Date(document.body.dataset.scanned),st=document.getElementById('status');
 const ageMin=(Date.now()-scanned)/60000;
-if(ageMin>25){const s=document.getElementById('stale');s.style.display='block';
- s.textContent='Last scan was '+(ageMin<120?Math.round(ageMin)+' min':Math.round(ageMin/60)+' h')+
- ' ago — normal outside market hours (Mon–Fri 09:15–15:30 IST); otherwise the scheduled run may be late.';}
-const rows=[...document.querySelectorAll('#stocks tbody tr')];
-let filter='all',query='';
-function apply(){for(const r of rows){const d=r.dataset;
+if(!isNaN(ageMin)){if(ageMin<=25){st.classList.add('live');st.lastChild.textContent=' Live · updated '+
+ (ageMin<1?'just now':Math.round(ageMin)+' min ago');}
+ else{st.classList.add('old');st.lastChild.textContent=' Last scan '+(ageMin<120?Math.round(ageMin)+
+ ' min':ageMin<2880?Math.round(ageMin/60)+' h':Math.round(ageMin/1440)+' days')+' ago';
+ st.title='Normal outside market hours (Mon–Fri 09:15–15:30 IST); otherwise a scheduled run may be late.';}}
+function chips(group,fn){const cs=[...document.querySelectorAll('[data-group='+group+'] .chip')];
+ cs.forEach(c=>c.onclick=()=>{cs.forEach(x=>x.classList.remove('on'));c.classList.add('on');fn(c.dataset.f);});}
+const sigs=[...document.querySelectorAll('#signals .sig')];
+chips('sig',f=>sigs.forEach(r=>r.style.display=(f==='all'||r.dataset.dir===f)?'':'none'));
+const rows=[...document.querySelectorAll('#stocks tbody tr')];let filter='all',query='';
+function apply(){let n=0;for(const r of rows){const d=r.dataset;
  const ok=(filter==='all'||(filter==='long'&&d.st==='1')||(filter==='short'&&d.st==='-1')||
- (filter==='abuy'&&+d.adx>0)||(filter==='asell'&&+d.adx<0)||(filter==='near'&&+d.dist<=NEAR))
- &&d.sym.includes(query);r.style.display=ok?'':'none';}}
-document.querySelectorAll('.chip').forEach(c=>c.onclick=()=>{
- document.querySelectorAll('.chip').forEach(x=>x.classList.remove('on'));c.classList.add('on');
- filter=c.dataset.f;apply();});
+ (filter==='abuy'&&+d.adx>0)||(filter==='asell'&&+d.adx<0)||(filter==='near'&&+d.dist<=NEAR)||
+ (filter==='both'&&((d.st==='1'&&+d.adx>0)||(d.st==='-1'&&+d.adx<0))))&&d.sym.includes(query);
+ r.style.display=ok?'':'none';n+=ok;}document.getElementById('shown').textContent=n+' shown';}
+chips('tbl',f=>{filter=f;apply();});
 document.getElementById('q').oninput=e=>{query=e.target.value.trim().toUpperCase();apply();};
-let sortKey='dist',asc=true;
-document.querySelectorAll('#stocks th').forEach(th=>th.onclick=()=>{
- const k=th.dataset.k;if(!k)return;asc=(k===sortKey)?!asc:true;sortKey=k;
- const tb=document.querySelector('#stocks tbody');
+let sortKey='dist',asc=true;const tb=document.querySelector('#stocks tbody');
+document.querySelectorAll('#stocks th[data-k]').forEach(th=>th.onclick=()=>{
+ const k=th.dataset.k;asc=(k===sortKey)?!asc:(k==='sym'||k==='dist');sortKey=k;
+ document.querySelectorAll('#stocks th').forEach(x=>x.classList.remove('sorted','desc'));
+ th.classList.add('sorted');if(!asc)th.classList.add('desc');
  rows.sort((a,b)=>{const x=a.dataset[k],y=b.dataset[k];
   const v=(k==='sym')?x.localeCompare(y):(+x)-(+y);return asc?v:-v;});
  rows.forEach(r=>tb.appendChild(r));});
+apply();
 """
 
 
 def _fmt_price(p):
     return f"{p:,.2f}" if isinstance(p, (int, float)) else "—"
+
+
+def _fmt_chg(chg):
+    if chg is None:
+        return '<span class="flat">—</span>'
+    cls = "up" if chg > 0 else ("dn" if chg < 0 else "flat")
+    return f'<span class="chg {cls}">{chg:+.2f}%</span>'
 
 
 def _st_pill(st):
@@ -535,57 +593,145 @@ def _adx_pill(adx):
     return f'<span class="pill {cls}">{label}</span>' if cls else '<span class="flat">—</span>'
 
 
-def _signal_pill(label):
-    return f'<span class="pill {"dn" if "SELL" in label else "up"}">{html_lib.escape(label)}</span>'
+def _direction(label):
+    return "sell" if "SELL" in label else "buy"
+
+
+def _signal_pill(label, big=False):
+    return (f'<span class="pill {"dn" if "SELL" in label else "up"}{" big" if big else ""}">'
+            f'{html_lib.escape(label)}</span>')
+
+
+def find_confluence(log):
+    """Stocks where SuperTrend and ADX_DI both fired the same direction on the
+    same trading day. Uses each strategy's latest signal that day, so a buy
+    later reversed by a sell doesn't count. Returns {day: [entry, ...]},
+    newest day first; each entry's "time" is when the second signal landed."""
+    latest = {}  # (day, name) -> {strategy: signal}
+    for s in log:
+        latest.setdefault((s["time"][:10], s["name"]), {})[s["strategy"]] = s
+    by_day = {}
+    for (day, name), strat in latest.items():
+        st, adx = strat.get("SuperTrend"), strat.get("ADX_DI")
+        if st and adx and _direction(st["label"]) == _direction(adx["label"]):
+            last = max(st, adx, key=lambda s: s["time"])
+            by_day.setdefault(day, []).append({
+                "name": name, "dir": _direction(st["label"]), "time": last["time"],
+                "price": last["price"], "st": st, "adx": adx})
+    for entries in by_day.values():
+        entries.sort(key=lambda x: x["time"], reverse=True)
+    return dict(sorted(by_day.items(), reverse=True)[:CONFLUENCE_DAYS])
+
+
+def _confluence_card(c, state, scan_time):
+    e = html_lib.escape
+    info = state.get(c["name"]) or state.get(INDEX_STATE_PREFIX + c["name"]) or {}
+    cls = "up" if c["dir"] == "buy" else "dn"
+    fresh = " fresh" if c["time"] == scan_time else ""
+    return (f'<div class="card {cls}{fresh}"><div class="top"><span class="name">{e(c["name"])}</span>'
+            f'<span class="pill {cls} big">BOTH {c["dir"].upper()}</span></div>'
+            f'<div class="px">{_fmt_price(info.get("last_close", c["price"]))}'
+            f' <span style="font-size:13px">{_fmt_chg(info.get("day_chg_pct"))}</span></div>'
+            f'<div class="row"><span>SuperTrend</span><span>{_signal_pill(c["st"]["label"])} '
+            f'{e(c["st"]["time"][11:16])} @ {_fmt_price(c["st"]["price"])}</span></div>'
+            f'<div class="row"><span>ADX DI</span><span>{_signal_pill(c["adx"]["label"])} '
+            f'{e(c["adx"]["time"][11:16])} @ {_fmt_price(c["adx"]["price"])}</span></div></div>')
 
 
 def write_dashboard(state):
-    """Render dashboard.html from the state file: index cards, today's signals,
-    and a filterable/sortable table of every stock. Static page, no server."""
+    """Render dashboard.html from the state file — a static page, no server:
+    summary tiles, index cards, stocks where both strategies agree, the
+    day's signal timeline, and a filterable/sortable table of every stock."""
     e = html_lib.escape
     meta = state.get(SCAN_META_KEY, {})
     scan_time = meta.get("time")
     universe = meta.get("universe") or NIFTY150
+    stocks = {s: state[s] for s in universe if s in state}
+    log = state.get(SIGNAL_LOG_KEY, [])
 
+    # summary tiles
+    latest_day = log[-1]["time"][:10] if log else None
+    today = [s for s in log if s["time"][:10] == latest_day][::-1]
+    n_buy = sum(_direction(s["label"]) == "buy" for s in today)
+    st_long = sum(v.get("st_trend") == 1 for v in stocks.values())
+    st_short = sum(v.get("st_trend") == -1 for v in stocks.values())
+    adx_buy = sum((v.get("adx_cond") or 0) > 0 for v in stocks.values())
+    adx_sell = sum((v.get("adx_cond") or 0) < 0 for v in stocks.values())
+    confluence = find_confluence(log)
+    conf_today = confluence.get(latest_day, []) if latest_day else []
+
+    def bar(u, d):
+        tot = (u + d) or 1
+        return (f'<div class="bar"><span class="u" style="width:{u / tot * 100:.1f}%"></span>'
+                f'<span class="d" style="width:{d / tot * 100:.1f}%"></span></div>')
+
+    tiles = (
+        f'<div class="tile"><div class="k">Signals {"today" if latest_day else ""}</div>'
+        f'<div class="v">{len(today)}</div><div class="s">{n_buy} buy · {len(today) - n_buy} sell</div>'
+        f'{bar(n_buy, len(today) - n_buy)}</div>'
+        f'<div class="tile"><div class="k">Both agree</div><div class="v">{len(conf_today)}</div>'
+        f'<div class="s">{sum(c["dir"] == "buy" for c in conf_today)} buy · '
+        f'{sum(c["dir"] == "sell" for c in conf_today)} sell</div></div>'
+        f'<div class="tile"><div class="k">SuperTrend</div><div class="v">{st_long}<span class="s"> / '
+        f'{st_short}</span></div><div class="s">long / short</div>{bar(st_long, st_short)}</div>'
+        f'<div class="tile"><div class="k">ADX DI</div><div class="v">{adx_buy}<span class="s"> / '
+        f'{adx_sell}</span></div><div class="s">buy / sell state</div>{bar(adx_buy, adx_sell)}</div>')
+
+    # indices
     cards = []
     for name in INDEX_TICKERS:
         info = state.get(INDEX_STATE_PREFIX + name)
         if not info:
             continue
         dist = info.get("distance_pct")
+        cls = "up" if info.get("st_trend") == 1 else ("dn" if info.get("st_trend") == -1 else "")
         cards.append(
-            f'<div class="card"><div class="name">{e(name)}</div>'
+            f'<div class="card {cls}"><div class="top"><span class="name">{e(name)}</span>'
+            f'{_fmt_chg(info.get("day_chg_pct"))}</div>'
             f'<div class="px">{_fmt_price(info.get("last_close"))}</div>'
-            f'SuperTrend {_st_pill(info.get("st_trend"))} &nbsp; ADX {_adx_pill(info.get("adx_cond"))}'
-            f'<div class="meta">{f"{dist:.2f}% to flip · " if dist is not None else ""}'
-            f'bar {e(str(info.get("last_ts", ""))[5:16])}</div></div>')
+            f'<div class="row"><span>SuperTrend</span>{_st_pill(info.get("st_trend"))}</div>'
+            f'<div class="row"><span>ADX DI</span>{_adx_pill(info.get("adx_cond"))}</div>'
+            f'<div class="row"><span>To flip</span><span>'
+            f'{f"{dist:.2f}%" if dist is not None else "—"}</span></div></div>')
 
-    log = state.get(SIGNAL_LOG_KEY, [])
-    latest_day = log[-1]["time"][:10] if log else None
-    today = [s for s in log if s["time"][:10] == latest_day][::-1]
-    fresh = {s["name"] for s in log if s["time"] == scan_time}
+    # both strategies agree
+    if conf_today:
+        conf_html = '<div class="cards wide">' + "".join(
+            _confluence_card(c, state, scan_time) for c in conf_today) + "</div>"
+    else:
+        conf_html = ('<div class="empty">No stock has fired the same direction on both '
+                     f'strategies {"on " + e(latest_day) if latest_day else "yet"}.</div>')
+    earlier = [(d, cs) for d, cs in confluence.items() if d != latest_day]
+    if earlier:
+        conf_html += (f'<details><summary>Earlier days ({sum(len(cs) for _, cs in earlier)})</summary>'
+                      + "".join(f'<div class="day">{e(d)}</div><div class="cards wide">'
+                                + "".join(_confluence_card(c, state, scan_time) for c in cs)
+                                + "</div>" for d, cs in earlier) + "</details>")
+
+    # signal timeline
     sig_rows = "".join(
-        f'<div class="sig"><span class="t">{e(s["time"][11:16])}</span>'
-        f'<span class="n">{e(s["name"])}</span>{_signal_pill(s["label"])}'
-        f'<span class="flat">{e(s["strategy"])}</span>'
+        f'<div class="sig{" fresh" if s["time"] == scan_time else ""}" data-dir="{_direction(s["label"])}">'
+        f'<span class="t">{e(s["time"][11:16])}</span><span class="n">{e(s["name"])}</span>'
+        f'{_signal_pill(s["label"])}<span class="flat st">{e(s["strategy"])}</span>'
         f'<span class="p">{_fmt_price(s["price"])}</span></div>' for s in today)
-    sig_title = f"Signals — {latest_day}" if latest_day else "Signals"
 
+    # stock table, nearest-to-flip first
     def nearest_first(sym):
-        dist = state.get(sym, {}).get("distance_pct")
+        dist = stocks[sym].get("distance_pct")
         return (dist is None, dist or 0.0)
 
+    fresh = {s["name"] for s in log if s["time"] == scan_time}
     trs = []
-    for sym in sorted(universe, key=nearest_first):
-        info = state.get(sym)
-        if not info:
-            continue
-        st, adx, dist = info.get("st_trend"), info.get("adx_cond", 0.0), info.get("distance_pct")
+    for sym in sorted(stocks, key=nearest_first):
+        info = stocks[sym]
+        st, adx = info.get("st_trend"), info.get("adx_cond") or 0.0
+        dist, chg = info.get("distance_pct"), info.get("day_chg_pct")
         trs.append(
             f'<tr{" class=fresh" if sym in fresh else ""} data-sym="{e(sym)}" data-st="{st}" '
             f'data-adx="{adx}" data-dist="{dist if dist is not None else 999}" '
-            f'data-px="{info.get("last_close") or 0}">'
-            f'<td><b>{e(sym)}</b></td><td>{_st_pill(st)}</td><td>{_adx_pill(adx)}</td>'
+            f'data-chg="{chg if chg is not None else 0}" data-px="{info.get("last_close") or 0}">'
+            f'<td><b>{e(sym)}</b></td><td class="num">{_fmt_chg(chg)}</td>'
+            f'<td>{_st_pill(st)}</td><td>{_adx_pill(adx)}</td>'
             f'<td class="num">{_fmt_price(info.get("last_close"))}</td>'
             f'<td class="num">{f"{dist:.2f}%" if dist is not None else "—"}</td>'
             f'<td class="hide-sm flat">{e(str(info.get("last_ts", ""))[5:16])}</td></tr>')
@@ -595,28 +741,37 @@ def write_dashboard(state):
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="300">
+<meta name="color-scheme" content="light dark">
 <title>Nifty150 Live Signals</title><style>{DASHBOARD_CSS}</style></head>
 <body data-scanned="{e(scanned_iso)}"><main>
-<h1>Nifty150 Live Signals</h1>
-<div class="meta">SuperTrend({ATR_PERIOD}×{MULTIPLIER:g}) + ADX DI · last scan {e(scan_time or "—")} IST ·
-{meta.get("checked", "—")}/{meta.get("total", "—")} stocks · updates every 15 min in market hours</div>
-<div class="stale" id="stale"></div>
-<h2>Indices</h2><div class="cards">{"".join(cards) or '<div class="empty">No index data yet.</div>'}</div>
-<h2>{e(sig_title)}</h2>
-<div class="list">{sig_rows or '<div class="empty">No signals yet.</div>'}</div>
-<h2>Stocks</h2>
-<div class="tools"><input id="q" placeholder="Search symbol" autocomplete="off">
-<button class="chip on" data-f="all">All</button><button class="chip" data-f="near">Near flip</button>
+<header><div><h1>Nifty150 Live Signals</h1>
+<div class="sub">SuperTrend ({ATR_PERIOD}×{MULTIPLIER:g}) + ADX DI · Nifty 100 + Midcap 50 ·
+{meta.get("checked", "—")}/{meta.get("total", "—")} stocks · last scan {e(scan_time or "—")} IST</div></div>
+<span class="status" id="status"><i></i> Waiting for first scan</span></header>
+<div class="tiles">{tiles}</div>
+<section><h2>Both strategies agree <span class="count">{e(latest_day or "")}</span></h2>
+<p class="hint">SuperTrend and ADX DI both fired the same direction on the same day
+(latest signal of each counts).</p>{conf_html}</section>
+<section><h2>Indices</h2>
+<div class="cards">{"".join(cards) or '<div class="empty">No index data yet.</div>'}</div></section>
+<section id="signals"><h2>Signals <span class="count">{e(latest_day or "")}</span></h2>
+<div class="tools" data-group="sig"><button class="chip on" data-f="all">All</button>
+<button class="chip" data-f="buy">Buy</button><button class="chip" data-f="sell">Sell</button></div>
+<div class="list">{sig_rows or '<div class="empty" style="border:0">No signals yet.</div>'}</div></section>
+<section><h2>All stocks <span class="count" id="shown"></span></h2>
+<div class="tools" data-group="tbl"><input id="q" placeholder="Search symbol…" autocomplete="off">
+<button class="chip on" data-f="all">All</button><button class="chip" data-f="both">Both agree now</button>
+<button class="chip" data-f="near">Near flip</button>
 <button class="chip" data-f="long">ST long</button><button class="chip" data-f="short">ST short</button>
 <button class="chip" data-f="abuy">ADX buy</button><button class="chip" data-f="asell">ADX sell</button></div>
 <div class="tw"><table id="stocks"><thead><tr>
-<th data-k="sym">Stock</th><th data-k="st">SuperTrend</th><th data-k="adx">ADX DI</th>
-<th class="num" data-k="px">Price</th><th class="num" data-k="dist">To flip</th>
-<th class="hide-sm">Bar (IST)</th></tr></thead>
-<tbody>{"".join(trs)}</tbody></table></div>
-<div class="foot">Sorted nearest-to-flip first; tap a column to sort. Highlighted rows fired in the
-latest scan. Data: Yahoo Finance, ~15 min delayed. SELL signals were not part of the backtests.
-Not investment advice.</div>
+<th data-k="sym">Stock</th><th class="num" data-k="chg">Chg</th><th data-k="st">SuperTrend</th>
+<th data-k="adx">ADX DI</th><th class="num" data-k="px">Price</th>
+<th class="num sorted" data-k="dist">To flip</th><th class="hide-sm">Bar (IST)</th></tr></thead>
+<tbody>{"".join(trs)}</tbody></table></div></section>
+<div class="foot">Highlighted = fired in the latest scan. "To flip" = distance from price to the
+SuperTrend band it must cross. Data: Yahoo Finance, ~15 min delayed; page refreshes every 5 min.
+SELL signals were not part of the backtests. Not investment advice.</div>
 </main><script>const NEAR={WATCHLIST_PCT};{DASHBOARD_JS}</script></body></html>"""
     DASHBOARD_FILE.write_text(page, encoding="utf-8")
 
@@ -684,8 +839,15 @@ def evaluate(name, df, prev):
         label = "SELL_STRONG" if adx_cond == -1.0 else "SELL"
         fired.append(("ADX_DI", name, label, last_close, last_ts))
 
+    # % change vs. the previous session's last close (for the dashboard)
+    dates = df.index.date
+    prev_session = c[dates < dates[-1]]
+    day_chg_pct = ((last_close / prev_session[-1] - 1) * 100.0
+                   if len(prev_session) and prev_session[-1] else None)
+
     new_state = {"st_trend": st_trend, "adx_cond": adx_cond, "last_ts": last_ts,
-                 "last_close": last_close, "distance_pct": distance_pct}
+                 "last_close": last_close, "distance_pct": distance_pct,
+                 "day_chg_pct": day_chg_pct}
     return new_state, fired
 
 
