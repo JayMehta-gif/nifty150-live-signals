@@ -433,7 +433,11 @@ def send_telegram(title, message):
 
 
 def notify(title, message):
-    print(f"\n*** {title} ***\n{message}\n")
+    if os.environ.get("CI"):
+        # GitHub Actions logs are public for a public repo — keep signals out of them
+        print("[signal] fired (details hidden from CI logs — see Telegram / dashboard)")
+    else:
+        print(f"\n*** {title} ***\n{message}\n")
     send_telegram(title, message)  # before the popup, which blocks for TOAST_DURATION_MS
     if DESKTOP_NOTIFY:
         try:

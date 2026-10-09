@@ -51,19 +51,34 @@ jobs:
         run: python -u nifty150_live_signals.py ${{ inputs.test_telegram && '--test-telegram' || '--once' }}
 
       # The scan (or, outside market hours, the last saved state) writes
-      # dashboard.html; publish it to GitHub Pages as the site's index page.
-      - name: Prepare dashboard site
+      # dashboard.html. It is published to GitHub Pages only in encrypted form
+      # (StatiCrypt, unlocked with the DASHBOARD_PASSWORD secret); without that
+      # secret nothing is published. The salt is fixed so "Remember me" keeps
+      # working across the 15-minute redeploys — it isn't secret.
+      - name: Encrypt dashboard
         id: site
         if: ${{ !inputs.test_telegram && hashFiles('dashboard.html') != '' }}
+        env:
+          DASHBOARD_PASSWORD: ${{ secrets.DASHBOARD_PASSWORD }}
         run: |
+          if [ -z "$DASHBOARD_PASSWORD" ]; then
+            echo "::warning::DASHBOARD_PASSWORD secret not set — dashboard not published"
+            exit 0
+          fi
           mkdir -p site
           cp dashboard.html site/index.html
+          npx --yes staticrypt@3 site/index.html -p "$DASHBOARD_PASSWORD" \
+            -s 377a6f269badd7ffccacac9db8e9ed1b --config false -d public --short --remember 30 \
+            --template-title "Nifty150 Live Signals" \
+            --template-instructions "Enter the dashboard password." \
+            --template-button "Unlock" \
+            --template-color-primary "#111827" --template-color-secondary "#f4f5f7"
           echo "ready=true" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-pages-artifact@v3
         if: steps.site.outputs.ready == 'true'
         with:
-          path: site
+          path: public
 
   publish:
     needs: scan
