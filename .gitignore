@@ -2,3 +2,6 @@
 signal_state.json
 telegram_config.json
 __pycache__/
+dashboard.html
+site/
+.claude/

@@ -23,6 +23,8 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      dashboard: ${{ steps.site.outputs.ready }}
     steps:
       - uses: actions/checkout@v4
 
@@ -47,3 +49,33 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python -u nifty150_live_signals.py ${{ inputs.test_telegram && '--test-telegram' || '--once' }}
+
+      # The scan (or, outside market hours, the last saved state) writes
+      # dashboard.html; publish it to GitHub Pages as the site's index page.
+      - name: Prepare dashboard site
+        id: site
+        if: ${{ !inputs.test_telegram && hashFiles('dashboard.html') != '' }}
+        run: |
+          mkdir -p site
+          cp dashboard.html site/index.html
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.site.outputs.ready == 'true'
+        with:
+          path: site
+
+  publish:
+    needs: scan
+    if: needs.scan.outputs.dashboard == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

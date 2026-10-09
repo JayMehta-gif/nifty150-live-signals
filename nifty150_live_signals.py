@@ -75,6 +75,7 @@ Rate-limit avoidance (yfinance / Yahoo chart API is aggressive about 429s):
 """
 import warnings; warnings.filterwarnings("ignore")
 
+import html as html_lib
 import json
 import os
 import random
@@ -440,6 +441,186 @@ def notify(title, message):
             print(f"[warn] desktop popup failed: {e}")
 
 
+# ─── Dashboard ──────────────────────────────────────────────────────────────
+
+DASHBOARD_FILE = Path(__file__).parent / "dashboard.html"
+SIGNAL_LOG_KEY = "__SIGNALS__"   # recent fired signals, kept in the state file
+SIGNAL_LOG_MAX = 300
+SCAN_META_KEY = "__SCAN__"       # last scan time / coverage
+ADX_LABELS = {1.0: "BUY_STRONG", 0.5: "BUY", 0.0: "—", -0.5: "SELL", -1.0: "SELL_STRONG"}
+
+DASHBOARD_CSS = """
+:root{--bg:#f6f7f9;--card:#fff;--fg:#14171c;--muted:#626a75;--line:#e3e6ea;
+--up:#0f8a4a;--up-bg:#e3f5ea;--dn:#c8323a;--dn-bg:#fbe7e8;--hl:#fff6d6;--accent:#2563eb}
+@media (prefers-color-scheme:dark){:root{--bg:#0e1116;--card:#161a21;--fg:#e7e9ec;
+--muted:#9aa3ae;--line:#272c35;--up:#4ade80;--up-bg:#12301f;--dn:#f87171;--dn-bg:#3a1719;
+--hl:#3a3212;--accent:#60a5fa}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+font:14px/1.45 -apple-system,"Segoe UI",Roboto,Arial,sans-serif}
+main{max-width:1000px;margin:0 auto;padding:16px}
+h1{font-size:18px;margin:0}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:22px 0 8px}
+.meta{color:var(--muted);font-size:12px;margin-top:4px}
+.stale{display:none;margin-top:8px;padding:8px 10px;border-radius:8px;background:var(--hl);font-size:12px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px}
+.card .name{font-weight:600}.card .px{font-size:20px;font-weight:600;margin:4px 0}
+.pill{display:inline-block;padding:1px 7px;border-radius:999px;font-size:11px;font-weight:600;white-space:nowrap}
+.up{color:var(--up);background:var(--up-bg)}.dn{color:var(--dn);background:var(--dn-bg)}
+.flat{color:var(--muted)}
+.sig{display:flex;gap:10px;align-items:baseline;padding:8px 12px;border-bottom:1px solid var(--line)}
+.sig:last-child{border-bottom:0}.sig .t{color:var(--muted);font-size:12px;min-width:44px}
+.sig .n{font-weight:600}.sig .p{margin-left:auto;font-variant-numeric:tabular-nums}
+.list{background:var(--card);border:1px solid var(--line);border-radius:10px}
+.empty{padding:12px;color:var(--muted)}
+.tools{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.tools input{flex:1 1 160px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;
+background:var(--card);color:var(--fg);font:inherit}
+.chip{padding:6px 10px;border:1px solid var(--line);border-radius:999px;background:var(--card);
+color:var(--fg);font:inherit;font-size:12px;cursor:pointer}
+.chip.on{border-color:var(--accent);color:var(--accent)}
+.tw{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:10px}
+table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+th,td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+th{font-size:12px;color:var(--muted);cursor:pointer;user-select:none;position:sticky;top:0;background:var(--card)}
+th.num,td.num{text-align:right}
+tr.fresh td{background:var(--hl)}
+tr:last-child td{border-bottom:0}
+.foot{color:var(--muted);font-size:12px;margin:18px 0 8px}
+@media (max-width:600px){.hide-sm{display:none}main{padding:12px}}
+"""
+
+DASHBOARD_JS = """
+const scanned=new Date(document.body.dataset.scanned);
+const ageMin=(Date.now()-scanned)/60000;
+if(ageMin>25){const s=document.getElementById('stale');s.style.display='block';
+ s.textContent='Last scan was '+(ageMin<120?Math.round(ageMin)+' min':Math.round(ageMin/60)+' h')+
+ ' ago — normal outside market hours (Mon–Fri 09:15–15:30 IST); otherwise the scheduled run may be late.';}
+const rows=[...document.querySelectorAll('#stocks tbody tr')];
+let filter='all',query='';
+function apply(){for(const r of rows){const d=r.dataset;
+ const ok=(filter==='all'||(filter==='long'&&d.st==='1')||(filter==='short'&&d.st==='-1')||
+ (filter==='abuy'&&+d.adx>0)||(filter==='asell'&&+d.adx<0)||(filter==='near'&&+d.dist<=NEAR))
+ &&d.sym.includes(query);r.style.display=ok?'':'none';}}
+document.querySelectorAll('.chip').forEach(c=>c.onclick=()=>{
+ document.querySelectorAll('.chip').forEach(x=>x.classList.remove('on'));c.classList.add('on');
+ filter=c.dataset.f;apply();});
+document.getElementById('q').oninput=e=>{query=e.target.value.trim().toUpperCase();apply();};
+let sortKey='dist',asc=true;
+document.querySelectorAll('#stocks th').forEach(th=>th.onclick=()=>{
+ const k=th.dataset.k;if(!k)return;asc=(k===sortKey)?!asc:true;sortKey=k;
+ const tb=document.querySelector('#stocks tbody');
+ rows.sort((a,b)=>{const x=a.dataset[k],y=b.dataset[k];
+  const v=(k==='sym')?x.localeCompare(y):(+x)-(+y);return asc?v:-v;});
+ rows.forEach(r=>tb.appendChild(r));});
+"""
+
+
+def _fmt_price(p):
+    return f"{p:,.2f}" if isinstance(p, (int, float)) else "—"
+
+
+def _st_pill(st):
+    if st == 1:
+        return '<span class="pill up">LONG</span>'
+    if st == -1:
+        return '<span class="pill dn">SHORT</span>'
+    return '<span class="flat">—</span>'
+
+
+def _adx_pill(adx):
+    label = ADX_LABELS.get(adx, "—")
+    cls = "up" if adx and adx > 0 else ("dn" if adx and adx < 0 else "")
+    return f'<span class="pill {cls}">{label}</span>' if cls else '<span class="flat">—</span>'
+
+
+def _signal_pill(label):
+    return f'<span class="pill {"dn" if "SELL" in label else "up"}">{html_lib.escape(label)}</span>'
+
+
+def write_dashboard(state):
+    """Render dashboard.html from the state file: index cards, today's signals,
+    and a filterable/sortable table of every stock. Static page, no server."""
+    e = html_lib.escape
+    meta = state.get(SCAN_META_KEY, {})
+    scan_time = meta.get("time")
+    universe = meta.get("universe") or NIFTY150
+
+    cards = []
+    for name in INDEX_TICKERS:
+        info = state.get(INDEX_STATE_PREFIX + name)
+        if not info:
+            continue
+        dist = info.get("distance_pct")
+        cards.append(
+            f'<div class="card"><div class="name">{e(name)}</div>'
+            f'<div class="px">{_fmt_price(info.get("last_close"))}</div>'
+            f'SuperTrend {_st_pill(info.get("st_trend"))} &nbsp; ADX {_adx_pill(info.get("adx_cond"))}'
+            f'<div class="meta">{f"{dist:.2f}% to flip · " if dist is not None else ""}'
+            f'bar {e(str(info.get("last_ts", ""))[5:16])}</div></div>')
+
+    log = state.get(SIGNAL_LOG_KEY, [])
+    latest_day = log[-1]["time"][:10] if log else None
+    today = [s for s in log if s["time"][:10] == latest_day][::-1]
+    fresh = {s["name"] for s in log if s["time"] == scan_time}
+    sig_rows = "".join(
+        f'<div class="sig"><span class="t">{e(s["time"][11:16])}</span>'
+        f'<span class="n">{e(s["name"])}</span>{_signal_pill(s["label"])}'
+        f'<span class="flat">{e(s["strategy"])}</span>'
+        f'<span class="p">{_fmt_price(s["price"])}</span></div>' for s in today)
+    sig_title = f"Signals — {latest_day}" if latest_day else "Signals"
+
+    def nearest_first(sym):
+        dist = state.get(sym, {}).get("distance_pct")
+        return (dist is None, dist or 0.0)
+
+    trs = []
+    for sym in sorted(universe, key=nearest_first):
+        info = state.get(sym)
+        if not info:
+            continue
+        st, adx, dist = info.get("st_trend"), info.get("adx_cond", 0.0), info.get("distance_pct")
+        trs.append(
+            f'<tr{" class=fresh" if sym in fresh else ""} data-sym="{e(sym)}" data-st="{st}" '
+            f'data-adx="{adx}" data-dist="{dist if dist is not None else 999}" '
+            f'data-px="{info.get("last_close") or 0}">'
+            f'<td><b>{e(sym)}</b></td><td>{_st_pill(st)}</td><td>{_adx_pill(adx)}</td>'
+            f'<td class="num">{_fmt_price(info.get("last_close"))}</td>'
+            f'<td class="num">{f"{dist:.2f}%" if dist is not None else "—"}</td>'
+            f'<td class="hide-sm flat">{e(str(info.get("last_ts", ""))[5:16])}</td></tr>')
+
+    scanned_iso = f"{scan_time.replace(' ', 'T')}+05:30" if scan_time else ""
+    page = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="300">
+<title>Nifty150 Live Signals</title><style>{DASHBOARD_CSS}</style></head>
+<body data-scanned="{e(scanned_iso)}"><main>
+<h1>Nifty150 Live Signals</h1>
+<div class="meta">SuperTrend({ATR_PERIOD}×{MULTIPLIER:g}) + ADX DI · last scan {e(scan_time or "—")} IST ·
+{meta.get("checked", "—")}/{meta.get("total", "—")} stocks · updates every 15 min in market hours</div>
+<div class="stale" id="stale"></div>
+<h2>Indices</h2><div class="cards">{"".join(cards) or '<div class="empty">No index data yet.</div>'}</div>
+<h2>{e(sig_title)}</h2>
+<div class="list">{sig_rows or '<div class="empty">No signals yet.</div>'}</div>
+<h2>Stocks</h2>
+<div class="tools"><input id="q" placeholder="Search symbol" autocomplete="off">
+<button class="chip on" data-f="all">All</button><button class="chip" data-f="near">Near flip</button>
+<button class="chip" data-f="long">ST long</button><button class="chip" data-f="short">ST short</button>
+<button class="chip" data-f="abuy">ADX buy</button><button class="chip" data-f="asell">ADX sell</button></div>
+<div class="tw"><table id="stocks"><thead><tr>
+<th data-k="sym">Stock</th><th data-k="st">SuperTrend</th><th data-k="adx">ADX DI</th>
+<th class="num" data-k="px">Price</th><th class="num" data-k="dist">To flip</th>
+<th class="hide-sm">Bar (IST)</th></tr></thead>
+<tbody>{"".join(trs)}</tbody></table></div>
+<div class="foot">Sorted nearest-to-flip first; tap a column to sort. Highlighted rows fired in the
+latest scan. Data: Yahoo Finance, ~15 min delayed. SELL signals were not part of the backtests.
+Not investment advice.</div>
+</main><script>const NEAR={WATCHLIST_PCT};{DASHBOARD_JS}</script></body></html>"""
+    DASHBOARD_FILE.write_text(page, encoding="utf-8")
+
+
 # ─── Market hours gate ──────────────────────────────────────────────────────
 
 def seconds_until_next_check():
@@ -595,8 +776,17 @@ def scan_once(per_symbol_delay=None):
 
     fired.extend(scan_indices(state))
 
+    now_str = f"{datetime.now(IST):%Y-%m-%d %H:%M:%S}"
+    log = state.get(SIGNAL_LOG_KEY, [])
+    log.extend({"time": now_str, "strategy": strategy, "name": name, "label": label,
+                "price": price, "bar": ts} for strategy, name, label, price, ts in fired)
+    state[SIGNAL_LOG_KEY] = log[-SIGNAL_LOG_MAX:]
+    state[SCAN_META_KEY] = {"time": now_str, "checked": checked, "total": len(universe),
+                            "universe": universe}
+
     save_state(state)
-    print(f"[{datetime.now(IST):%Y-%m-%d %H:%M:%S}] checked {checked}/{len(universe)} stocks "
+    write_dashboard(state)
+    print(f"[{now_str}] checked {checked}/{len(universe)} stocks "
           f"+ {len(INDEX_TICKERS)} indices, {len(fired)} new signal(s)")
 
     for strategy, symbol, label, price, ts in fired:
@@ -634,6 +824,8 @@ if __name__ == "__main__":
         now = datetime.now(IST)
         if now.weekday() >= 5 or not ((9, 15) <= (now.hour, now.minute) <= ONCE_LATEST_RUN):
             print(f"[{now:%Y-%m-%d %H:%M} IST] outside market hours — skipping scan")
+            if STATE_FILE.exists():  # still (re)publish the page from the last scan
+                write_dashboard(load_state())
             sys.exit(0)
         scan_once(float(os.environ.get("SCAN_PACE_SECONDS", ONCE_PACE_SECONDS)))
         sys.exit(0)
