@@ -459,13 +459,31 @@ def show_toast(title, message):
     root.mainloop()
 
 
-def send_telegram(title, message):
-    """Send via the Telegram Bot API (stdlib only). Returns True on success."""
+TELEGRAM_MAX_CHARS = 3900  # Telegram's limit is 4096 per message
+
+
+def send_telegram(text):
+    """Send HTML-formatted text via the Telegram Bot API (stdlib only), split
+    into several messages on line boundaries if it's too long. Returns True if
+    every part was delivered."""
     if not TELEGRAM_TOKEN:
         return False
+    parts, cur = [], ""
+    for line in text.split("\n"):
+        if cur and len(cur) + len(line) + 1 > TELEGRAM_MAX_CHARS:
+            parts.append(cur)
+            cur = ""
+        cur = f"{cur}\n{line}" if cur else line
+    parts.append(cur)
+    return all(_send_telegram_part(part) for part in parts if part.strip())
+
+
+def _send_telegram_part(text):
     data = urllib.parse.urlencode({
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": f"{title}\n{message}",
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": "true",
     }).encode()
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     for attempt in range(3):
@@ -481,16 +499,49 @@ def send_telegram(title, message):
     return False
 
 
-def notify(title, message):
+def format_alert(fired, confirmed=(), html=True):
+    """One scan's signals as a single message: 🟢 BUY and 🔴 SELL sections,
+    one line per signal (ticker · price · strategy), then any new double
+    confirmations. No date/time — Telegram timestamps every message."""
+    b = (lambda x: f"<b>{html_lib.escape(x)}</b>") if html else (lambda x: x)
+
+    def px(name, price):  # indices are points, not rupees
+        return f"{price:,.2f}" if name in INDEX_TICKERS else f"₹{price:,.2f}"
+
+    def line(sig):
+        strategy, name, label, price, _ = sig
+        strat = "SuperTrend" if strategy == "SuperTrend" else "ADX DI"
+        strong = " · Strong" if label.endswith("STRONG") else ""
+        return f"{b(name)}  {px(name, price)}  ·  {strat}{strong}"
+
+    sections = []
+    for emoji, title, side in (("🟢", "BUY", False), ("🔴", "SELL", True)):
+        rows = sorted((f for f in fired if ("SELL" in f[2]) == side), key=lambda f: (f[1], f[0]))
+        if rows:
+            sections.append(f"{emoji} {b(title)}\n" + "\n".join(line(f) for f in rows))
+    if confirmed:
+        sections.append(f"⭐ {b('Double confirmation')}\n" + "\n".join(
+            f"{'🟢' if d == 'buy' else '🔴'} {b(name)}  {px(name, price)}  ·  SuperTrend + ADX DI {d.upper()}"
+            for name, d, price in sorted(confirmed)))
+    return "\n\n".join(sections)
+
+
+def notify_signals(fired, confirmed=()):
+    """Send one scan's signals: Telegram digest, console, desktop popup."""
+    if not fired and not confirmed:
+        return
+    n_sell = sum("SELL" in f[2] for f in fired)
     if os.environ.get("CI"):
         # GitHub Actions logs are public for a public repo — keep signals out of them
-        print("[signal] fired (details hidden from CI logs — see Telegram / dashboard)")
+        print(f"[signal] {len(fired)} fired (details hidden from CI logs — see Telegram / dashboard)")
     else:
-        print(f"\n*** {title} ***\n{message}\n")
-    send_telegram(title, message)  # before the popup, which blocks for TOAST_DURATION_MS
+        print("\n" + format_alert(fired, confirmed, html=False) + "\n")
+    send_telegram(format_alert(fired, confirmed))  # before the popup, which blocks
     if DESKTOP_NOTIFY:
         try:
-            show_toast(title, message)
+            body = format_alert(fired, confirmed, html=False).splitlines()
+            more = f"\n… and {len(body) - 8} more lines" if len(body) > 8 else ""
+            show_toast(f"{len(fired) - n_sell} BUY · {n_sell} SELL", "\n".join(body[:8]) + more)
         except Exception as e:
             print(f"[warn] desktop popup failed: {e}")
 
@@ -1446,9 +1497,11 @@ def scan_once(per_symbol_delay=None):
     print(f"[{now_str}] checked {checked}/{len(universe)} stocks "
           f"+ {len(INDEX_TICKERS)} indices, {len(fired)} new signal(s)")
 
-    for strategy, symbol, label, price, ts in fired:
-        notify(f"{strategy} {label} — {symbol}",
-               f"{symbol} @ {price:.2f}  ({strategy}, bar {fmt_stamp(ts)} IST)")
+    # double confirmations completed by this scan's signals
+    confirmed = [(c["name"], c["dir"], c["price"])
+                 for c in find_confluence(state[SIGNAL_LOG_KEY]).get(now_str[:10], [])
+                 if c["time"] == now_str]
+    notify_signals(fired, confirmed)
 
 
 def main():
@@ -1473,7 +1526,12 @@ if __name__ == "__main__":
     if "--test-telegram" in sys.argv:
         if not TELEGRAM_TOKEN:
             sys.exit("Telegram is not configured — see the Telegram note at the top of this file.")
-        ok = send_telegram("Nifty150 notifier — test", "Telegram alerts are working.")
+        ok = send_telegram("✅ <b>Technical Dashboard</b> — Telegram alerts are working.\n"
+                           "Signals will arrive like this:\n\n" + format_alert(
+                               [("SuperTrend", "RELIANCE", "BUY", 1207.70, ""),
+                                ("ADX_DI", "RELIANCE", "BUY_STRONG", 1207.70, ""),
+                                ("SuperTrend", "M&M", "SELL", 2792.00, "")],
+                               [("RELIANCE", "buy", 1207.70)]))
         sys.exit(0 if ok else "Telegram test message failed — check the token and chat id.")
     if "--once" in sys.argv:
         # Single scan for schedulers (GitHub Actions) — the cron decides timing,
