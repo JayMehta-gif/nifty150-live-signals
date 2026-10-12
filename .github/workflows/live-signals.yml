@@ -4,7 +4,9 @@ on:
   schedule:
     # Cron is in UTC. NSE session 09:15-15:30 IST = 03:45-10:00 UTC, Mon-Fri.
     # The 10:15/10:30 UTC runs (15:45/16:00 IST) pick up the final bars,
-    # since Yahoo data lags ~15 min. GitHub may start runs a few minutes late.
+    # since Yahoo data lags ~15 min. GitHub may start runs late or skip them, so
+    # an external timer (cron-job.org) also triggers workflow_dispatch on time;
+    # whichever arrives second within 8 minutes is skipped as a duplicate.
     - cron: "45 3 * * 1-5"
     - cron: "0,15,30,45 4-9 * * 1-5"
     - cron: "0,15,30 10 * * 1-5"
@@ -25,14 +27,14 @@ concurrency:
 
 jobs:
   scan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # pinned: ubuntu-latest moves to 26.04 from 19 Oct 2026
     timeout-minutes: 15
     outputs:
       dashboard: ${{ steps.site.outputs.ready }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -44,7 +46,7 @@ jobs:
       # history so only the first scan of a day downloads 15 days and later
       # scans fetch just today's bars. Every run saves a new cache entry;
       # restore-keys picks up the most recent one.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             signal_state.json
@@ -56,6 +58,10 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # optional repository variables (Settings → Secrets and variables → Actions → Variables):
+          # TELEGRAM_MODE = all (default) | confirmed ; TELEGRAM_UNTIL = HH:MM cut-off, e.g. 14:00
+          TELEGRAM_MODE: ${{ vars.TELEGRAM_MODE }}
+          TELEGRAM_UNTIL: ${{ vars.TELEGRAM_UNTIL }}
         run: python -u nifty150_live_signals.py ${{ inputs.test_telegram && '--test-telegram' || (inputs.full_scan && '--test' || '--once') }}
 
       # The scan (or, outside market hours, the last saved state) writes
@@ -83,7 +89,7 @@ jobs:
             --template-color-primary "#111827" --template-color-secondary "#f4f5f7"
           echo "ready=true" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         if: steps.site.outputs.ready == 'true'
         with:
           path: public
@@ -91,7 +97,7 @@ jobs:
   publish:
     needs: scan
     if: needs.scan.outputs.dashboard == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # pinned: ubuntu-latest moves to 26.04 from 19 Oct 2026
     timeout-minutes: 5
     permissions:
       pages: write
@@ -101,4 +107,4 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

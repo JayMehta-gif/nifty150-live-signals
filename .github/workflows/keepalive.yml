@@ -1,0 +1,25 @@
+name: Keep schedule alive
+
+# GitHub pauses scheduled workflows in a public repository after 60 days with
+# no commits. This makes one tiny commit a month so the scans never stop.
+on:
+  schedule:
+    - cron: "0 6 1 * *"   # 1st of every month, 11:30 AM IST
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          date -u +"%Y-%m-%d" > .github/keepalive
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/keepalive
+          git commit -m "Keep scheduled scans alive" || echo "nothing to commit"
+          git push

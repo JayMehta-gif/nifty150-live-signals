@@ -53,6 +53,9 @@ Notes:
     id from https://api.telegram.org/bot<TOKEN>/getUpdates. Verify with:
         python nifty150_live_signals.py --test-telegram
     If neither is configured, Telegram is skipped (popup + console only).
+    Optional: TELEGRAM_MODE=confirmed sends only double confirmations + index
+    signals (default "all"); TELEGRAM_UNTIL=HH:MM stops alerts after that time.
+    The dashboard always shows every signal.
 
 Rate-limit avoidance (yfinance / Yahoo chart API is aggressive about 429s):
   1. One shared curl_cffi session impersonating a real browser TLS/HTTP
@@ -207,10 +210,14 @@ INDEX_TICKERS = {
 }
 
 
+SECTORS = {}  # symbol -> NSE industry, filled by load_universe()
+
+
 def load_universe():
     """Live Nifty 100 + Midcap 50 constituents from NSE, else the NIFTY150
     snapshot. Each CSV must parse to roughly its expected size, so an error
-    page or a half-loaded file can't silently shrink the universe."""
+    page or a half-loaded file can't silently shrink the universe. Also fills
+    SECTORS from the CSVs' Industry column."""
     from io import StringIO
     try:
         symbols = set()
@@ -220,7 +227,10 @@ def load_universe():
             else:
                 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
                 text = urllib.request.urlopen(req, timeout=15).read().decode()
-            got = set(pd.read_csv(StringIO(text))["Symbol"].str.strip())
+            table = pd.read_csv(StringIO(text))
+            got = set(table["Symbol"].str.strip())
+            if "Industry" in table:
+                SECTORS.update(zip(table["Symbol"].str.strip(), table["Industry"].astype(str).str.strip()))
             if abs(len(got) - expected) > 5:
                 raise ValueError(f"{name} list has {len(got)} symbols, expected ~{expected}")
             symbols |= got
@@ -526,6 +536,28 @@ def format_alert(fired, confirmed=(), html=True):
     return "\n\n".join(sections)
 
 
+TELEGRAM_MODE = os.environ.get("TELEGRAM_MODE", "all").strip().lower() or "all"
+TELEGRAM_UNTIL = os.environ.get("TELEGRAM_UNTIL", "").strip()  # e.g. "14:00": no alerts after that
+
+
+def telegram_filter(fired, confirmed, now=None):
+    """Apply the Telegram mode (the dashboard always shows everything):
+      all       — every signal + double confirmations (default)
+      confirmed — double confirmations + index signals only
+    and TELEGRAM_UNTIL, a cut-off time after which nothing is sent."""
+    now = now or datetime.now(IST)
+    if TELEGRAM_UNTIL:
+        try:
+            hh, mm = map(int, TELEGRAM_UNTIL.split(":"))
+            if (now.hour, now.minute) > (hh, mm):
+                return [], []
+        except ValueError:
+            print(f"[warn] TELEGRAM_UNTIL={TELEGRAM_UNTIL!r} isn't HH:MM — ignoring it")
+    if TELEGRAM_MODE == "confirmed":
+        return [f for f in fired if f[1] in INDEX_TICKERS], list(confirmed)
+    return list(fired), list(confirmed)
+
+
 def notify_signals(fired, confirmed=()):
     """Send one scan's signals: Telegram digest, console, desktop popup."""
     if not fired and not confirmed:
@@ -536,7 +568,9 @@ def notify_signals(fired, confirmed=()):
         print(f"[signal] {len(fired)} fired (details hidden from CI logs — see Telegram / dashboard)")
     else:
         print("\n" + format_alert(fired, confirmed, html=False) + "\n")
-    send_telegram(format_alert(fired, confirmed))  # before the popup, which blocks
+    tg_fired, tg_conf = telegram_filter(fired, confirmed)
+    if tg_fired or tg_conf:
+        send_telegram(format_alert(tg_fired, tg_conf))  # before the popup, which blocks
     if DESKTOP_NOTIFY:
         try:
             body = format_alert(fired, confirmed, html=False).splitlines()
@@ -664,6 +698,14 @@ tr.fresh td{background:var(--hl)}
 .wr .tr b{display:block;height:100%;background:var(--up)}.wr .tr b.lo{background:var(--dn)}
 tr.grp td{background:var(--head);font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;
 letter-spacing:.04em;padding:7px 12px}
+a.tv{color:inherit;text-decoration:none}a.tv:hover{text-decoration:underline;color:var(--accent)}
+.star{appearance:none;border:0;background:none;color:var(--faint);cursor:pointer;font-size:15px;padding:0 6px 0 0;line-height:1}
+.star.on{color:#f59e0b}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}.grid2 section{margin:0}
+tr.secrow{cursor:pointer}tr.secrow.on td{background:var(--accent-bg)}
+#eq svg{display:block;width:100%;height:220px}#eq .lg{display:flex;gap:16px;font-size:12px;color:var(--muted);margin-bottom:6px}
+#eq .lg i{display:inline-block;width:14px;height:3px;border-radius:2px;vertical-align:middle;margin-right:6px}
+@media (max-width:980px){.grid2{grid-template-columns:1fr}}
 .foot{font-size:12px;color:var(--faint);padding:14px 0 0;border-top:1px solid var(--line);line-height:1.6}
 @media (max-width:1100px){.hide-md{display:none}}
 @media (max-width:980px){.idx{grid-template-columns:repeat(3,1fr)}}
@@ -678,6 +720,7 @@ letter-spacing:.04em;padding:7px 12px}
 
 DASHBOARD_JS = """
 const $=(s,r=document)=>r.querySelector(s),$$=(s,r=document)=>[...r.querySelectorAll(s)];
+const esc=x=>String(x).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 /* theme */
 $('#theme').onclick=()=>{const r=document.documentElement;
  const dark=r.dataset.theme?r.dataset.theme==='dark':matchMedia('(prefers-color-scheme: dark)').matches;
@@ -694,6 +737,14 @@ function show(id){$$('.tab').forEach(t=>t.classList.toggle('on',t.dataset.v===id
 $$('.tab').forEach(t=>t.onclick=()=>{show(t.dataset.v);history.replaceState(null,'','#'+t.dataset.v)});
 const ok=v=>v&&$('#v-'+v);let first=location.hash.slice(1);
 if(!ok(first)){try{first=localStorage.getItem('tab')}catch(e){}}show(ok(first)?first:'live');
+/* favourites (per device) */
+let FAV=new Set();try{FAV=new Set(JSON.parse(localStorage.getItem('favs')||'[]'))}catch(e){}
+const saveFav=()=>{try{localStorage.setItem('favs',JSON.stringify([...FAV]))}catch(e){}};
+function paintStars(){$$('.star').forEach(b=>{const on=FAV.has(b.dataset.fav);b.classList.toggle('on',on);b.textContent=on?'★':'☆'})}
+document.addEventListener('click',ev=>{const b=ev.target.closest('.star');if(!b)return;const k=b.dataset.fav;
+ FAV.has(k)?FAV.delete(k):FAV.add(k);saveFav();paintStars();if(typeof renderPast==='function')renderPast();stk&&stk.run()});
+const tvUrl=n=>'https://www.tradingview.com/chart/?interval=15&symbol='+encodeURIComponent('NSE:'+(TVI[n]||n.replace(/-/g,'_')));
+const tvA=n=>'<a class="tv sym" href="'+tvUrl(n)+'" target="_blank" rel="noopener" title="Open '+esc(n)+' on TradingView (15 min)">'+esc(n)+'</a>';
 /* segmented controls + filters */
 function seg(el,fn){const bs=$$('button',el);bs.forEach(b=>b.onclick=()=>{bs.forEach(x=>x.classList.remove('on'));
  b.classList.add('on');fn(b.dataset.f)})}
@@ -705,7 +756,7 @@ function filterer(tbodySel,countSel){const rows=$$(tbodySel+' tr[data-sym]'),f={
   r.style.display=ok?'':'none';n+=ok}
   if(countSel)$(countSel).textContent=n+' shown';const e=$(tbodySel+' .nores');if(e)e.style.display=n?'none':'';};
  return {set(k,v){f[k]=v;run()},run}}
-const VIEWS={all:()=>true,aligned:d=>(d.st==='1'&&+d.adx>0)||(d.st==='-1'&&+d.adx<0),near:d=>+d.dist<=NEAR,
+const VIEWS={all:()=>true,fav:d=>FAV.has(d.sym),stale:d=>d.stale==='1',aligned:d=>(d.st==='1'&&+d.adx>0)||(d.st==='-1'&&+d.adx<0),near:d=>+d.dist<=NEAR,
  long:d=>d.st==='1',short:d=>d.st==='-1',abuy:d=>+d.adx>0,asell:d=>+d.adx<0};
 const live=filterer('#t-live tbody');seg($('#f-live-dir'),v=>live.set('dir',v));
 /* shared archive (ARCH/NAMES/PX/PDAYS come from the data script).
@@ -717,8 +768,7 @@ const mvOf=r=>{const px=r[7]?PX[r[1]]:r[5];if(!px||!r[4])return null;const m=(px
    [time, name, label, strategy, price, exit, move, bars, open, confirmed, max gain, max drawdown] */
 const PAST=ARCH.filter(r=>r[3]<2&&PDAYS.has(r[0].slice(0,10))).reverse().map(r=>[r[0],NAMES[r[1]],r[2],SN[r[3]],r[4],
  r[7]?null:r[5],mvOf(r),r[6],r[7],CONF.has(r[0].slice(0,10)+'|'+r[1])?1:0,r[8],r[9]]);
-const PT=$('#t-past tbody'),pf={day:'',dir:'all',strat:'all',conf:false,sym:''};let pk='t',pa=false;
-const esc=x=>String(x).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const PT=$('#t-past tbody'),pf={day:'',dir:'all',strat:'all',conf:false,sym:'',sess:'',str:'all',fav:false};let pk='t',pa=false;
 const fp=v=>v==null?'—':v.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
 const tg=l=>'<span class="tag '+(l.includes('SELL')?'dn':'up')+'">'+l.replace('_',' ')+'</span>';
 const pc=v=>v==null?'<span class="fa">—</span>':Math.abs(v)<0.005?'<span class="mu">0.00%</span>':
@@ -728,10 +778,12 @@ const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','De
 const dshort=t=>+t.slice(8,10)+' '+MON[+t.slice(5,7)-1];
 const bt=(b,o)=>b==null?'—':o?(b===0?'<span class="tag ok">new</span>':'<span class="mu">'+b+'+</span>'):b;
 function renderPast(){const rows=PAST.filter(r=>r[0].startsWith(pf.day)&&(pf.dir==='all'||(pf.dir==='sell')===r[2].includes('SELL'))
- &&(pf.strat==='all'||r[3]===pf.strat)&&(!pf.conf||r[9])&&(!pf.sym||r[1]===pf.sym));
+ &&(pf.strat==='all'||r[3]===pf.strat)&&(!pf.conf||r[9])&&(!pf.sym||r[1]===pf.sym)&&(!pf.fav||FAV.has(r[1]))
+ &&(pf.str==='all'||(pf.str==='strong')===r[2].endsWith('STRONG'))
+ &&(!pf.sess||(r[0].slice(11,16)>=pf.sess.slice(0,5)&&r[0].slice(11,16)<pf.sess.slice(6))));
  const i={t:0,sym:1,mv:6,bars:7,mfe:10,mae:11}[pk];rows.sort((a,b)=>{const x=a[i],y=b[i];
   const v=typeof x==='string'?x.localeCompare(y):(x??-999)-(y??-999);return pa?v:-v});
- PT.innerHTML=rows.map(r=>'<tr><td class="mu">'+(pf.day?'':dshort(r[0])+', ')+t12(r[0])+'</td><td class="sym">'+esc(r[1])+(r[9]?' <span class="tag ok">✓</span>':'')+
+ PT.innerHTML=rows.map(r=>'<tr><td class="mu">'+(pf.day?'':dshort(r[0])+', ')+t12(r[0])+'</td><td>'+tvA(r[1])+(r[9]?' <span class="tag ok">✓</span>':'')+
   '</td><td>'+tg(r[2])+'</td><td class="mu hide-md">'+(r[3]==='SuperTrend'?'SuperTrend':'ADX DI')+'</td><td class="r hide-sm">'+fp(r[4])+
   '</td><td class="r hide-md">'+(r[8]?'<span class="fa">open</span>':fp(r[5]))+'</td><td class="r">'+pc(r[6])+'</td><td class="r">'+pc(r[10])+'</td><td class="r hide-sm">'+pc(r[11])+
   '</td><td class="r">'+bt(r[7],r[8])+'</td></tr>').join('')
@@ -744,6 +796,9 @@ daySel.onchange=()=>{pf.day=daySel.value;$$('.daysum').forEach(x=>x.style.displa
 seg($('#f-past-dir'),v=>{pf.dir=v;renderPast()});seg($('#f-past-strat'),v=>{pf.strat=v;renderPast()});
 $('#f-past-conf').onchange=e=>{pf.conf=e.target.checked;renderPast()};
 $('#f-past-sym').onchange=e=>{pf.sym=e.target.value;renderPast()};
+$('#f-past-sess').onchange=e=>{pf.sess=e.target.value;renderPast()};
+seg($('#f-past-str'),v=>{pf.str=v;renderPast()});
+$('#f-past-fav').onchange=e=>{pf.fav=e.target.checked;renderPast()};
 daySel.onchange();
 /* accuracy: overall or for one stock / index */
 const med=a=>{if(!a.length)return null;const s=[...a].sort((x,y)=>x-y),m=s.length>>1;return s.length%2?s[m]:(s[m-1]+s[m])/2};
@@ -777,6 +832,7 @@ function renderAcc(sym){const ni=sym?NAMES.indexOf(sym):-1;const rows=sym?ARCH.f
   grp('ADX DI')+accRow('BUY',L(ad,'BUY'))+accRow('BUY_STRONG',L(ad,'BUY_STRONG'))+accRow('SELL',L(ad,'SELL'))+
   accRow('SELL_STRONG',L(ad,'SELL_STRONG'))+accRow('ALL',ad)+grp('Double confirmation (enter on 2nd signal, exit on 1st flip)')+
   accRow('CONFIRMED BUY',L(cf,'BUY'))+accRow('CONFIRMED SELL',L(cf,'SELL'));
+ accRows=rows;renderSim(rows);renderHours(sig);$('#lb-wrap').style.display=sym?'none':'';if(!sym)renderLeaders(sig);
  const w=$('#acc-log-wrap');w.style.display=sym?'':'none';if(!sym)return;
  const log=[...rows].reverse();$('#acc-log-title').textContent=sym+' — every signal';$('#acc-log-count').textContent=log.length+' signals';
  $('#acc-log').innerHTML=log.map(r=>'<tr><td class="mu">'+dshort(r[0])+', '+t12(r[0])+'</td><td>'+tg(r[3]===2?'CONFIRMED '+r[2]:r[2])+
@@ -784,10 +840,62 @@ function renderAcc(sym){const ni=sym?NAMES.indexOf(sym):-1;const rows=sym?ARCH.f
   '</td><td class="r hide-md">'+(r[7]?'<span class="fa">open</span>':fp(r[5]))+'</td><td class="r">'+pc(mvOf(r))+'</td><td class="r">'+
   pc(r[8])+'</td><td class="r hide-sm">'+pc(r[9])+'</td><td class="r">'+bt(r[6],r[7])+'</td></tr>').join('')||
   '<tr><td colspan="9" class="empty">No signals for this one yet.</td></tr>'}
+/* exit-rule simulator: ARCH r[10]/r[11] = bars until price first moved SIM_LEVELS[i]% in / against the
+   signal's favour (0 = never). Same-candle touches count as the stop (cautious). */
+const simT=$('#sim-t'),simS=$('#sim-s');
+[simT,simS].forEach((el,k)=>{el.innerHTML='<option value="-1">None</option>'+SIM_LEVELS.map((v,i)=>'<option value="'+i+'">'+v+'%</option>').join('');});
+simT.value='1';simS.value='-1';
+function simOne(r,ti,si){const tb=ti<0?0:(r[10][ti]||0),sb=si<0?0:(r[11][si]||0);
+ if(tb&&(!sb||tb<sb))return[SIM_LEVELS[ti],'t'];if(sb)return[-SIM_LEVELS[si],'s'];
+ if(r[7])return[null,'o'];return[mvOf(r),'f']}
+function simRow(label,rows,ti,si){let res=[],t=0,st=0,f=0;const base=[];
+ for(const r of rows){const[v,k]=simOne(r,ti,si);if(v==null)continue;res.push(v);k==='t'?t++:k==='s'?st++:f++;}
+ for(const r of rows){if(!r[7]){const m=mvOf(r);if(m!=null)base.push(m)}}
+ const avg=res.length?res.reduce((a,b)=>a+b,0)/res.length:null,bavg=base.length?base.reduce((a,b)=>a+b,0)/base.length:null;
+ const win=res.length?res.filter(x=>x>0).length/res.length*100:null;
+ const wr=win==null?'<span class="fa">—</span>':'<div class="wr"><span style="min-width:38px">'+win.toFixed(0)+'%</span><span class="tr"><b class="'+(win<50?'lo':'')+'" style="width:'+win.toFixed(0)+'%"></b></span></div>';
+ const d=(avg!=null&&bavg!=null)?avg-bavg:null;
+ return '<tr><td>'+label+'</td><td class="r">'+res.length+'</td><td>'+wr+'</td><td class="r">'+pc(avg)+'</td><td class="r">'+pc(med(res))+
+  '</td><td class="r hide-sm">'+t+'</td><td class="r hide-sm">'+st+'</td><td class="r hide-sm">'+f+'</td><td class="r">'+(d==null?'—':pc(d)+' <span class="sm">per trade</span>')+'</td></tr>'}
+function renderSim(rows){const ti=+simT.value,si=+simS.value,sig=rows.filter(r=>r[3]<2);
+ $('#sim-note').textContent=ti<0&&si<0?'No target or stop: every trade exits at the flip (same as the table above).':'';
+ $('#sim-body').innerHTML=simRow('All signals',sig,ti,si)+simRow('SuperTrend',sig.filter(r=>r[3]===0),ti,si)+
+  simRow('ADX DI',sig.filter(r=>r[3]===1),ti,si)+simRow('Double confirmation',rows.filter(r=>r[3]===2),ti,si);
+ renderEquity(sig,ti,si)}
+function renderEquity(sig,ti,si){const closed=sig.filter(r=>!r[7]).sort((a,b)=>a[0]<b[0]?-1:1);
+ const base=[],rule=[];let a=0,b=0;for(const r of closed){const m=mvOf(r);if(m==null)continue;a+=m;base.push(a);
+  const[v]=simOne(r,ti,si);b+=v==null?0:v;rule.push(b)}
+ const el=$('#eq');if(base.length<2){el.innerHTML='<div class="empty">Not enough closed signals yet.</div>';return}
+ const all=base.concat(rule),lo=Math.min(0,...all),hi=Math.max(0,...all),W=1000,H=220,P=8;
+ const X=i=>P+i*(W-2*P)/(base.length-1),Y=v=>H-P-(v-lo)*(H-2*P)/((hi-lo)||1);
+ const line=(arr,c)=>'<polyline fill="none" stroke="'+c+'" stroke-width="2" vector-effect="non-scaling-stroke" points="'+arr.map((v,i)=>X(i).toFixed(1)+','+Y(v).toFixed(1)).join(' ')+'"/>';
+ const showRule=!(ti<0&&si<0);
+ el.innerHTML='<div class="lg"><span><i style="background:var(--faint)"></i>Exit at flip: '+pc(a)+'</span>'+
+  (showRule?'<span><i style="background:var(--accent)"></i>With simulator rule: '+pc(b)+'</span>':'')+'<span>'+base.length+' trades</span></div>'+
+  '<svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none"><line x1="0" x2="'+W+'" y1="'+Y(0)+'" y2="'+Y(0)+'" stroke="var(--line)" stroke-dasharray="4 4" vector-effect="non-scaling-stroke"/>'+
+  line(base,'var(--faint)')+(showRule?line(rule,'var(--accent)'):'')+'</svg>'}
+function renderHours(sig){const h={};for(const r of sig){const k=r[0].slice(11,13);(h[k]=h[k]||[]).push(r)}
+ $('#acc-hour').innerHTML=Object.keys(h).sort().map(k=>{const a=stats(h[k]),hr=+k;
+  const lbl=(hr%12||12)+(hr<12?' AM':' PM');
+  const wr=a.win==null?'—':'<div class="wr"><span style="min-width:38px">'+a.win.toFixed(0)+'%</span><span class="tr"><b class="'+(a.win<50?'lo':'')+'" style="width:'+a.win.toFixed(0)+'%"></b></span></div>';
+  return '<tr><td>'+lbl+'</td><td class="r">'+a.n+'</td><td>'+wr+'</td><td class="r">'+pc(a.avg)+'</td><td class="r">'+pc(a.mfe)+'</td></tr>'}).join('')}
+function renderLeaders(sig){const g={};for(const r of sig)(g[r[1]]=g[r[1]]||[]).push(r);
+ const rows=Object.entries(g).map(([k,v])=>[NAMES[k],stats(v)]).filter(([,a])=>a.closed>=5).sort((x,y)=>y[1].avg-x[1].avg);
+ const row=([n,a])=>'<tr><td>'+tvA(n)+'</td><td class="r">'+a.closed+'</td><td>'+(a.win==null?'—':a.win.toFixed(0)+'%')+'</td><td class="r">'+pc(a.avg)+'</td><td class="r hide-sm">'+pc(a.mfe)+'</td></tr>';
+ const top=rows.slice(0,8),bot=rows.slice(-8).filter(x=>!top.includes(x));
+ $('#acc-lb').innerHTML=rows.length?'<tr class="grp"><td colspan="5">Best</td></tr>'+top.map(row).join('')+
+  (bot.length?'<tr class="grp"><td colspan="5">Worst</td></tr>'+bot.map(row).join(''):''):'<tr><td colspan="5" class="empty">Not enough closed signals yet.</td></tr>'}
+let accRows=ARCH;
+[simT,simS].forEach(el=>el.onchange=()=>renderSim(accRows));
 const accSel=$('#f-acc-sym');accSel.onchange=()=>{renderAcc(accSel.value);try{localStorage.setItem('accsym',accSel.value)}catch(e){}};
 try{const v=localStorage.getItem('accsym');if(v&&[...accSel.options].some(o=>o.value===v))accSel.value=v}catch(e){}
 renderAcc(accSel.value);
 const stk=filterer('#t-stocks tbody','#c-stocks');seg($('#f-stk-view'),v=>stk.set('view',v));
+const secSel=$('#f-stk-sector');secSel.onchange=()=>{stk.set('sector',secSel.value);
+ $$('tr.secrow').forEach(r=>r.classList.toggle('on',r.dataset.sec===secSel.value))};
+$$('tr.secrow').forEach(r=>r.onclick=()=>{secSel.value=secSel.value===r.dataset.sec?'':r.dataset.sec;secSel.onchange();
+ $('#f-stk-q').scrollIntoView({behavior:'smooth',block:'center'})});
+paintStars();
 $('#f-stk-q').oninput=e=>stk.set('q',e.target.value.trim().toUpperCase());stk.run();
 /* sortable tables */
 $$('table[data-sort]').forEach(tbl=>{const tb=$('tbody',tbl);let key=tbl.dataset.sort,asc=true;
@@ -837,6 +945,23 @@ def fmt_stamp(ts, year=False):
 
 def _direction(label):
     return "sell" if "SELL" in label else "buy"
+
+
+TV_INDEX = {"NIFTY 50": "NIFTY", "BANK NIFTY": "BANKNIFTY", "NIFTY NEXT 50": "NIFTYJR",
+            "NIFTY MIDCAP 150": "NIFTYMIDCAP150", "NIFTY SMALLCAP 250": "NIFTYSMLCAP250",
+            "NIFTY 500": "CNX500"}
+
+
+def tv_url(name):
+    """TradingView 15-min chart for a stock or index ("-" becomes "_", "&" stays)."""
+    sym = TV_INDEX.get(name, name.replace("-", "_"))
+    return "https://www.tradingview.com/chart/?interval=15&symbol=" + urllib.parse.quote("NSE:" + sym)
+
+
+def _tv(name, cls="sym"):
+    e = html_lib.escape
+    return (f'<a class="tv {cls}" href="{e(tv_url(name))}" target="_blank" rel="noopener" '
+            f'title="Open {e(name)} on TradingView (15 min)">{e(name)}</a>')
 
 
 def _pct(v, signed=True):
@@ -979,7 +1104,7 @@ def write_dashboard(state):
         dist = info.get("distance_pct")
         dist_txt = e(f"{dist:.2f}% to flip") if dist is not None else ""
         ix_html.append(
-            f'<div class="panel ix"><div class="nm" title="{e(name)}">{e(name)}</div>'
+            f'<div class="panel ix"><div class="nm" title="{e(name)}">{_tv(name, "")}</div>'
             f'<div class="px">{_fmt_price(info.get("last_close"))}</div>'
             f'<div class="ft">{_pct(info.get("day_chg_pct"))}'
             f'<span class="sm">{dist_txt}</span></div>'
@@ -1023,7 +1148,7 @@ def write_dashboard(state):
         return f'<td class="r">{_pct(h.get("mfe"))}</td><td class="r hide-sm">{_pct(h.get("mae"))}</td>'
 
     conf_rows = "".join(
-        f'<tr data-sym="{e(c["name"])}"><td class="sym">{e(c["name"])}</td>'
+        f'<tr data-sym="{e(c["name"])}"><td>{_tv(c["name"])}</td>'
         f'<td>{_tag("CONFIRMED " + c["dir"].upper())}</td>'
         f'<td>{_tag(c["st"]["label"])} <span class="mu">{e(fmt_time(c["st"]["time"]))}</span></td>'
         f'<td>{_tag(c["adx"]["label"])} <span class="mu">{e(fmt_time(c["adx"]["time"]))}</span></td>'
@@ -1034,7 +1159,7 @@ def write_dashboard(state):
     live_rows = "".join(
         f'<tr data-sym="{e(s["name"])}" data-dir="{_direction(s["label"])}"'
         f'{" class=fresh" if s["time"] == scan_time else ""}>'
-        f'<td class="mu">{e(fmt_time(s["time"]))}</td><td class="sym">{e(s["name"])}</td><td>{_tag(s["label"])}</td>'
+        f'<td class="mu">{e(fmt_time(s["time"]))}</td><td>{_tv(s["name"])}</td><td>{_tag(s["label"])}</td>'
         f'<td class="mu hide-sm">{_strat_name(s["strategy"])}</td><td class="r">{_fmt_price(s["price"])}</td>'
         f'<td class="r">{_pct(now_move(s))}</td>'
         f'{excursion_cells(_match_replay(archive, s["name"], (s["strategy"],), _direction(s["label"]), s["time"][:10], s["time"]))}</tr>'
@@ -1055,12 +1180,15 @@ def write_dashboard(state):
     name_ix = {n: i for i, n in enumerate(names)}
     arch_rows = [[h["time"], name_ix[h["name"]], h["label"], strat_code[h["strategy"]], round(h["price"], 2),
                   round(h["exit_price"], 2) if h.get("exit_price") else None, h.get("bars"),
-                  1 if h.get("open", True) else 0, h.get("mfe"), h.get("mae")]
+                  1 if h.get("open", True) else 0, h.get("mfe"), h.get("mae"),
+                  h.get("hf") or [], h.get("ha") or []]
                  for h in sorted(archive, key=lambda x: x["time"])]
     prices = {name_ix[n]: _current_price(state, n) for n in names}
     data_js = ("const NAMES=" + json.dumps(names) + ";const ARCH=" + json.dumps(arch_rows, separators=(",", ":"))
                + ";const PX=" + json.dumps(prices, separators=(",", ":"))
-               + ";const PDAYS=new Set(" + json.dumps(past_days) + ");").replace("</", "<\\/")
+               + ";const PDAYS=new Set(" + json.dumps(past_days) + ");const SIM_LEVELS="
+               + json.dumps(list(SIM_LEVELS)) + ";const TVI=" + json.dumps(TV_INDEX)
+               + ";").replace("</", "<\\/")
     per_day = {d: sum(1 for h in past if h["time"][:10] == d) for d in past_days}
     day_opts = "".join(f'<option value="{d}">{e(fmt_day(d))} · {per_day[d]} signals</option>' for d in past_days)
     if past_days:
@@ -1114,6 +1242,9 @@ def write_dashboard(state):
         if s["name"] not in last_sig or s["time"] > last_sig[s["name"]]["time"]:
             last_sig[s["name"]] = s
     fresh = {s["name"] for s in log if s["time"] == scan_time}
+    sectors = meta.get("sectors", {})
+    newest_bar = max((v.get("last_ts", "") for v in stocks.values()), default="")
+    stale = {sym for sym, v in stocks.items() if v.get("last_ts", "") < newest_bar}
     stock_rows = []
     for sym in sorted(stocks, key=lambda x: (stocks[x].get("distance_pct") is None, stocks[x].get("distance_pct") or 0)):
         info = stocks[sym]
@@ -1123,14 +1254,38 @@ def write_dashboard(state):
         dist_s = f"{dist:.2f}%" if dist is not None else "—"
         mv = outcome({**ls, "open": True}, info.get("last_close"))[0] if ls else None
         max_txt = (f' · max {ls["mfe"]:+.2f}% / {ls["mae"]:+.2f}%' if ls and ls.get("mfe") is not None else "")
+        sector = sectors.get(sym, "—")
+        stale_tag = (f' <span class="tag mute" title="Latest candle is {e(fmt_stamp(info.get("last_ts", "")))} — '
+                     f'Yahoo hasn\'t published newer data for this stock">stale</span>' if sym in stale else "")
         stock_rows.append(
-            f'<tr data-sym="{e(sym)}" data-st="{st}" data-adx="{adx}" data-dist="{dist if dist is not None else 999}" '
+            f'<tr data-sym="{e(sym)}" data-sector="{e(sector)}" data-stale="{int(sym in stale)}" '
+            f'data-st="{st}" data-adx="{adx}" data-dist="{dist if dist is not None else 999}" '
             f'data-chg="{chg if chg is not None else 0}" data-px="{info.get("last_close") or 0}" '
             f'data-mv="{mv if mv is not None else -999}"{" class=fresh" if sym in fresh else ""}>'
-            f'<td class="sym">{e(sym)}</td><td class="r">{_fmt_price(info.get("last_close"))}</td>'
+            f'<td><button class="star" data-fav="{e(sym)}" aria-label="Favourite">☆</button>{_tv(sym)}{stale_tag}</td>'
+            f'<td class="mu hide-md">{e(sector)}</td><td class="r">{_fmt_price(info.get("last_close"))}</td>'
             f'<td class="r">{_pct(chg)}</td><td>{_st_tag(st)}</td><td>{_adx_tag(adx)}</td>'
             f'<td class="r">{dist_s}</td>'
             f'<td>{(_tag(ls["label"]) + " " + _pct(mv) + "<div class=sm>" + e(fmt_stamp(ls["time"])) + max_txt + "</div>") if ls else "<span class=fa>—</span>"}</td></tr>')
+
+    by_sector = {}
+    for sym, v in stocks.items():
+        by_sector.setdefault(sectors.get(sym, "Other"), []).append(v)
+    sector_rows = []
+    for sec, vs in sorted(by_sector.items(), key=lambda kv: -sum(v.get("st_trend") == 1 for v in kv[1]) / len(kv[1])):
+        n = len(vs)
+        lng = sum(v.get("st_trend") == 1 for v in vs)
+        ab = sum((v.get("adx_cond") or 0) > 0 for v in vs)
+        asl = sum((v.get("adx_cond") or 0) < 0 for v in vs)
+        chgs = [v["day_chg_pct"] for v in vs if v.get("day_chg_pct") is not None]
+        sector_rows.append(
+            f'<tr data-sym="{e(sec)}" data-sec="{e(sec)}" class="secrow"><td class="sym">{e(sec)}</td><td class="r">{n}</td>'
+            f'<td><div class="wr"><span style="min-width:38px">{lng / n * 100:.0f}%</span><span class="tr">'
+            f'<b class="{"lo" if lng / n < 0.5 else ""}" style="width:{lng / n * 100:.0f}%"></b></span></div></td>'
+            f'<td class="r"><span class="up">{ab}</span> / <span class="dn">{asl}</span></td>'
+            f'<td class="r">{_pct(sum(chgs) / len(chgs) if chgs else None)}</td></tr>')
+    sector_opts = '<option value="">All sectors</option>' + "".join(
+        f'<option value="{e(sec)}">{e(sec)} · {len(vs)}</option>' for sec, vs in sorted(by_sector.items()))
 
     def table(tid, head, rows, empty, sort=None):
         return (f'<div class="panel tw"><table id="{tid}"{f" data-sort={sort}" if sort else ""}><thead><tr>{head}</tr>'
@@ -1138,7 +1293,8 @@ def write_dashboard(state):
                 f'<td colspan="12" class="empty">{empty}</td></tr></tbody></table></div>')
 
     scanned_iso = f"{scan_time.replace(' ', 'T')}+05:30" if scan_time else ""
-    sub = (f'{meta.get("checked")}/{meta.get("total")} stocks · {len(INDEX_TICKERS)} indices · '
+    stale_txt = f' · {len(stale)} stale' if stale else ""
+    sub = (f'{meta.get("checked")}/{meta.get("total")} stocks{stale_txt} · {len(INDEX_TICKERS)} indices · '
            f'{e(fmt_stamp(scan_time, year=True))} IST' if scan_time else "Waiting for the first full scan")
     page = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -1185,7 +1341,12 @@ stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
 <div class="tb"><select class="sel" id="f-past-day" aria-label="Day">{day_opts or '<option value="">No data yet</option>'}</select>
 <div class="seg" id="f-past-dir"><button class="on" data-f="all">All</button><button data-f="buy">Buy</button><button data-f="sell">Sell</button></div>
 <div class="seg" id="f-past-strat"><button class="on" data-f="all">Both</button><button data-f="SuperTrend">SuperTrend</button><button data-f="ADX_DI">ADX DI</button></div>
+<select class="sel" id="f-past-sess" aria-label="Time of day"><option value="">All day</option>
+<option value="09:15-11:00">9:15 – 11 AM</option><option value="11:00-14:00">11 AM – 2 PM</option>
+<option value="14:00-15:30">2 – 3:30 PM</option></select>
+<div class="seg" id="f-past-str"><button class="on" data-f="all">Any strength</button><button data-f="strong">Strong</button><button data-f="normal">Not strong</button></div>
 <label class="chk"><input type="checkbox" id="f-past-conf"> Confirmed only</label>
+<label class="chk"><input type="checkbox" id="f-past-fav"> ★ only</label>
 <select class="sel" id="f-past-sym" aria-label="Stock or index">{past_sym_opts}</select></div>
 {"".join(day_sums)}
 {table("t-past", '<th class="sorted desc" data-k="t" data-asc="0">Time</th><th data-k="sym" data-asc="1">Stock</th><th>Signal</th><th class="hide-md">Strategy</th><th class="r hide-sm">Price</th><th class="r hide-md">Exit</th><th class="r" data-k="mv" data-asc="0">Move</th><th class="r" data-k="mfe" data-asc="0">Max gain</th><th class="r hide-sm" data-k="mae" data-asc="1">Max drawdown</th><th class="r" data-k="bars" data-asc="1">Bars</th>',
@@ -1207,6 +1368,23 @@ against it before the flip; <b>Bars</b> = 15-min bars until that strategy flippe
 <th>Win rate</th><th class="r">Median bars</th><th class="r">Median move</th><th class="r">Median max gain</th>
 <th class="r">Median max drawdown</th><th class="r hide-sm">Avg move</th>
 <th class="r hide-sm">Open · now</th></tr></thead><tbody id="acc-body"></tbody></table></div>
+<section style="margin-top:26px"><div class="sh"><h2>Exit-rule simulator</h2>
+<span class="meta">what if you exited at a profit target or stop-loss instead of waiting for the flip?</span></div>
+<div class="tb"><label class="chk">Target <select class="sel" id="sim-t"></select></label>
+<label class="chk">Stop-loss <select class="sel" id="sim-s"></select></label>
+<span class="mu" style="font-size:12px" id="sim-note"></span></div>
+<div class="panel tw"><table><thead><tr><th>Signals</th><th class="r">Trades</th><th>Win rate</th><th class="r">Avg / trade</th>
+<th class="r">Median</th><th class="r hide-sm">Hit target</th><th class="r hide-sm">Hit stop</th><th class="r hide-sm">Exited at flip</th>
+<th class="r">vs waiting for flip</th></tr></thead><tbody id="sim-body"></tbody></table></div></section>
+<section style="margin-top:26px"><div class="sh"><h2>Equity curve</h2>
+<span class="meta">cumulative % if every closed signal were taken with equal size, in time order</span></div>
+<div class="panel" style="padding:14px 16px"><div id="eq"></div></div></section>
+<div class="grid2" style="margin-top:26px"><section><div class="sh"><h2>By time of day</h2>
+<span class="meta">signal candle hour</span></div><div class="panel tw"><table><thead><tr><th>Hour</th><th class="r">Signals</th>
+<th>Win rate</th><th class="r">Avg move</th><th class="r">Median max gain</th></tr></thead><tbody id="acc-hour"></tbody></table></div></section>
+<section id="lb-wrap"><div class="sh"><h2>Stock leaderboard</h2><span class="meta">min 5 closed signals · by avg move</span></div>
+<div class="panel tw"><table><thead><tr><th>Stock</th><th class="r">Closed</th><th>Win rate</th><th class="r">Avg move</th>
+<th class="r hide-sm">Median max gain</th></tr></thead><tbody id="acc-lb"></tbody></table></div></section></div>
 <section id="acc-log-wrap" style="display:none;margin-top:26px"><div class="sh"><h2 id="acc-log-title">Signals</h2>
 <span class="meta" id="acc-log-count"></span></div>
 <div class="panel tw"><table><thead><tr><th>When</th><th>Signal</th><th class="hide-sm">Strategy</th>
@@ -1215,16 +1393,24 @@ against it before the flip; <b>Bars</b> = 15-min bars until that strategy flippe
 <p class="note below">A signal <b>wins</b> if price moved in its favour (up after a buy, down after a sell) by the bar where that
 strategy flipped. <b>Median bars</b> = 15-min bars until the flip; <b>Median move</b> = typical % move in the signal's favour at
 the flip; <b>Max gain</b> / <b>Max drawdown</b> = the furthest price went in the signal's favour / against it
-(candle highs and lows) before the flip. Open signals aren't scored — their current move is shown separately. Builds up to {ARCHIVE_KEEP_DAYS} days of history.</p>
+(candle highs and lows) before the flip. Open signals aren't scored — their current move is shown separately. Builds up to {ARCHIVE_KEEP_DAYS} days of history.
+<b>Simulator</b>: a trade exits at the target or stop, whichever price reaches first (if both are touched in the same 15-min candle
+it assumes the stop — the cautious choice); otherwise at the flip. Open signals that haven't hit either level aren't counted.
+Ignores brokerage, taxes and slippage.</p>
 </div>
 
 <div class="view" id="v-stocks">
+<section><div class="sh"><h2>Sector breadth</h2><span class="meta">tap a sector to filter the stocks below</span></div>
+{table("t-sectors", '<th>Sector</th><th class="r">Stocks</th><th>SuperTrend long</th><th class="r">ADX buy / sell</th><th class="r">Avg day</th>',
+       "".join(sector_rows), "No sector data yet.")}</section>
 <div class="sh"><h2>All stocks</h2><span class="meta" id="c-stocks"></span></div>
 <div class="tb"><input type="search" id="f-stk-q" placeholder="Search stock…" autocomplete="off">
-<div class="seg" id="f-stk-view"><button class="on" data-f="all">All</button><button data-f="aligned" title="SuperTrend and ADX DI point the same way">Aligned</button>
+<select class="sel" id="f-stk-sector" aria-label="Sector">{sector_opts}</select>
+<div class="seg" id="f-stk-view"><button class="on" data-f="all">All</button><button data-f="fav" title="Your starred stocks">★</button><button data-f="aligned" title="SuperTrend and ADX DI point the same way">Aligned</button>
 <button data-f="near" title="Within {WATCHLIST_PCT:g}% of a SuperTrend flip">Near flip</button><button data-f="long">ST long</button>
-<button data-f="short">ST short</button><button data-f="abuy">ADX buy</button><button data-f="asell">ADX sell</button></div></div>
-{table("t-stocks", '<th data-k="sym" data-asc="1">Stock</th><th class="r" data-k="px" data-asc="0">Price</th><th class="r" data-k="chg" data-asc="0">Day</th><th data-k="st" data-asc="0">SuperTrend</th><th data-k="adx" data-asc="0">ADX DI</th><th class="r sorted" data-k="dist" data-asc="1">To flip</th><th data-k="mv" data-asc="0">Last signal</th>',
+<button data-f="short">ST short</button><button data-f="abuy">ADX buy</button><button data-f="asell">ADX sell</button>
+<button data-f="stale" title="Latest candle older than the rest">Stale</button></div></div>
+{table("t-stocks", '<th data-k="sym" data-asc="1">Stock</th><th class="hide-md" data-k="sector" data-asc="1">Sector</th><th class="r" data-k="px" data-asc="0">Price</th><th class="r" data-k="chg" data-asc="0">Day</th><th data-k="st" data-asc="0">SuperTrend</th><th data-k="adx" data-asc="0">ADX DI</th><th class="r sorted" data-k="dist" data-asc="1">To flip</th><th data-k="mv" data-asc="0">Last signal</th>',
        "".join(stock_rows), "No stocks match.", "dist")}
 </div>
 
@@ -1259,6 +1445,7 @@ def seconds_until_next_check():
 PACE_FRACTION = 0.85  # fraction of the poll window spent spreading requests
 ONCE_PACE_SECONDS = 1.0  # --once mode: CI minutes are billed, so scan faster
 ONCE_LATEST_RUN = (16, 15)  # --once: allow late/delayed runs to catch the final bar
+MIN_SCAN_GAP = 8 * 60       # --once: a run this soon after the last scan is a duplicate trigger
 
 
 INDEX_STATE_PREFIX = "__INDEX__"  # state keys for indices, kept apart from stocks
@@ -1314,6 +1501,7 @@ def evaluate(name, df, prev):
 
 
 HISTORY_DAYS = 10        # trading days selectable in the dashboard's "Past signals" tab
+SIM_LEVELS = (0.5, 1.0, 1.5, 2.0, 3.0)  # % targets / stops the exit simulator can test
 REPLAY_DAYS = 10         # trading days replayed per scan (of the ~15 fetched; the rest is warm-up)
 ARCHIVE_KEY = "__ARCHIVE__"
 ARCHIVE_KEEP_DAYS = 30   # calendar days of replayed signals kept for the accuracy tracker
@@ -1349,21 +1537,39 @@ def bar_signals(name, df, close, trend, condition):
     def candle(j):
         return df.index[j].strftime("%Y-%m-%d %H:%M:%S")
 
+    def first_hits(i, end, buy):
+        """For each SIM_LEVELS % move: bars after the signal until price first
+        reached it in the signal's favour (hf) / against it (ha); 0 = never."""
+        p = close[i]
+        up = (high[i + 1:end + 1] / p - 1) * 100.0
+        dn = (1 - low[i + 1:end + 1] / p) * 100.0
+        fav, adv = (up, dn) if buy else (dn, up)
+
+        def hits(x):
+            out = []
+            for lvl in SIM_LEVELS:
+                j = np.nonzero(x >= lvl)[0]
+                out.append(int(j[0]) + 1 if len(j) else 0)
+            return out
+        return hits(fav), hits(adv)
+
     def entry(i, end, still_open, strategy, label):
         buy = "SELL" not in label
         if end > i:
             hi = (high[i + 1:end + 1].max() / close[i] - 1) * 100.0
             lo = (low[i + 1:end + 1].min() / close[i] - 1) * 100.0
             mfe, mae = (hi, lo) if buy else (-lo, -hi)
+            hf, ha = first_hits(i, end, buy)
         else:
             mfe = mae = 0.0
+            hf = ha = [0] * len(SIM_LEVELS)
         return {"time": candle(i), "strategy": strategy, "name": name, "label": label,
                 "price": float(close[i]), "bar": str(df.index[i]),
                 "bars": int(end - i), "open": still_open,
                 "exit_price": None if still_open else float(close[end]),
                 "exit_time": None if still_open else candle(end),
                 "mfe": round(float(max(mfe, 0.0)), 3), "mae": round(float(min(mae, 0.0)), 3),
-                "_i": int(i), "_end": int(end)}
+                "hf": hf, "ha": ha, "_i": int(i), "_end": int(end)}
 
     dates = df.index.date
     days = sorted(set(dates))[-REPLAY_DAYS:]
@@ -1515,7 +1721,8 @@ def scan_once(per_symbol_delay=None):
     log.extend({"time": now_str, "strategy": strategy, "name": name, "label": label,
                 "price": price, "bar": ts} for strategy, name, label, price, ts in fired)
     state[SIGNAL_LOG_KEY] = log[-SIGNAL_LOG_MAX:]
-    state[SCAN_META_KEY] = {"time": now_str, "checked": checked, "total": len(universe),
+    sectors = {**state.get(SCAN_META_KEY, {}).get("sectors", {}), **SECTORS}
+    state[SCAN_META_KEY] = {"time": now_str, "checked": checked, "total": len(universe), "sectors": sectors,
                             "universe": universe}
 
     save_state(state)
@@ -1529,6 +1736,22 @@ def scan_once(per_symbol_delay=None):
                  for c in find_confluence(state[SIGNAL_LOG_KEY]).get(now_str[:10], [])
                  if c["time"] == now_str]
     notify_signals(fired, confirmed)
+
+
+def once_skip_reason(now, last_scan=None, probe=None):
+    """Why a scheduled (--once) run should do nothing, or None to scan:
+    a second trigger within MIN_SCAN_GAP of the last scan (the external timer
+    and GitHub's own schedule both fire), or no NIFTY 50 candle dated today
+    (an NSE holiday, or the first candle isn't published yet)."""
+    if last_scan is None and STATE_FILE.exists():
+        last_scan = load_state().get(SCAN_META_KEY, {}).get("time")
+    if last_scan and (now.replace(tzinfo=None) - datetime.fromisoformat(last_scan)).total_seconds() < MIN_SCAN_GAP:
+        return f"duplicate trigger (last scan {last_scan[11:16]})"
+    if probe is None:
+        probe = _download("NIFTY 50", INDEX_TICKERS["NIFTY 50"], "1d")
+    if probe is None or probe.empty or probe.index[-1].date() != now.date():
+        return "no market data for today (holiday, or first candle not published yet)"
+    return None
 
 
 def main():
@@ -1567,6 +1790,12 @@ if __name__ == "__main__":
         if now.weekday() >= 5 or not ((9, 15) <= (now.hour, now.minute) <= ONCE_LATEST_RUN):
             print(f"[{now:%Y-%m-%d %H:%M} IST] outside market hours — skipping scan")
             if STATE_FILE.exists():  # still (re)publish the page from the last scan
+                write_dashboard(load_state())
+            sys.exit(0)
+        reason = once_skip_reason(now)
+        if reason:
+            print(f"[{now:%Y-%m-%d %H:%M} IST] {reason} — skipping scan")
+            if STATE_FILE.exists() and "duplicate" not in reason:
                 write_dashboard(load_state())
             sys.exit(0)
         scan_once(float(os.environ.get("SCAN_PACE_SECONDS", ONCE_PACE_SECONDS)))
