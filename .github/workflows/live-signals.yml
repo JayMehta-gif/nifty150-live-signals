@@ -59,7 +59,7 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           # optional repository variables (Settings → Secrets and variables → Actions → Variables):
-          # TELEGRAM_MODE = all (default) | confirmed ; TELEGRAM_UNTIL = HH:MM cut-off, e.g. 14:00
+          # TELEGRAM_MODE = gated (default) | all | confirmed ; TELEGRAM_UNTIL = HH:MM cut-off, e.g. 14:00
           TELEGRAM_MODE: ${{ vars.TELEGRAM_MODE }}
           TELEGRAM_UNTIL: ${{ vars.TELEGRAM_UNTIL }}
         run: python -u nifty150_live_signals.py ${{ inputs.test_telegram && '--test-telegram' || (inputs.full_scan && '--test' || '--once') }}

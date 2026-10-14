@@ -53,9 +53,10 @@ Notes:
     id from https://api.telegram.org/bot<TOKEN>/getUpdates. Verify with:
         python nifty150_live_signals.py --test-telegram
     If neither is configured, Telegram is skipped (popup + console only).
-    Optional: TELEGRAM_MODE=confirmed sends only double confirmations + index
-    signals (default "all"); TELEGRAM_UNTIL=HH:MM stops alerts after that time.
-    The dashboard always shows every signal.
+    Optional: TELEGRAM_MODE = gated (default: only signals whose 2-hour AND
+    daily SuperTrend agree — the stage gates), all, or confirmed (double
+    confirmations + index signals); TELEGRAM_UNTIL=HH:MM stops alerts after
+    that time. The dashboard always shows every signal, with gate badges.
 
 Rate-limit avoidance (yfinance / Yahoo chart API is aggressive about 429s):
   1. One shared curl_cffi session impersonating a real browser TLS/HTTP
@@ -400,13 +401,78 @@ def fetch_15m(symbol, yf_ticker=None):
     return df
 
 
-def _download(symbol, yf_ticker, period):
+HTF_HISTORY = "60d"  # hourly history behind the 2-hour / daily trend gates
+
+
+def _bucket(index, minutes):
+    """Session-aligned bucket start for each timestamp: NSE opens 9:15, so 2h
+    candles are 9:15 / 11:15 / 13:15 / 15:15 and 1h candles start at :15."""
+    mins = index.hour * 60 + index.minute - 555
+    return index.normalize() + pd.to_timedelta(555 + (mins // minutes) * minutes, unit="m")
+
+
+def _ohlc(df, key):
+    g = df.groupby(key)
+    out = pd.DataFrame({"open": g["open"].first(), "high": g["high"].max(),
+                        "low": g["low"].min(), "close": g["close"].last()})
+    return out, g
+
+
+def htf_trends(symbol, yf_ticker, df15):
+    """SuperTrend direction on 2-hour and daily candles, for the stage gates.
+    Built from 60 days of hourly bars (downloaded once a day, cached) plus
+    today's 15-min bars, so the gates update intraday without extra downloads.
+    Returns {"2h": (close_ns, trend), "1d": (close_ns, trend)} where close_ns
+    is when each candle closed (epoch ns) — callers only use candles that had
+    closed by the time in question, so nothing looks ahead."""
+    cache = load_bars_cache()
+    key = f"{yf_ticker}|1h"
+    today = datetime.now(IST).date()
+    hist = cache.get(key)
+    if hist is None or hist.attrs.get("full_fetch") != str(today):
+        got = _download(symbol, yf_ticker, HTF_HISTORY, interval="1h")
+        if got is not None:
+            hist = got.copy()
+            hist.attrs["full_fetch"] = str(today)
+            cache[key] = hist
+    if hist is None or df15 is None or df15.empty:
+        return None
+    last_day = df15.index[-1].date()
+    today15 = df15[df15.index.date == last_day]
+    h1_today, _ = _ohlc(today15, _bucket(today15.index, 60))
+    h1 = pd.concat([hist[hist.index.date < last_day][["open", "high", "low", "close"]], h1_today]).sort_index()
+    out = {}
+    for name, minutes in (("2h", 120), ("1d", None)):
+        key_ix = (_bucket(h1.index, minutes) if minutes else h1.index.normalize() + pd.Timedelta(minutes=555))
+        bars, g = _ohlc(h1, key_ix)
+        if len(bars) < 20:
+            return None
+        last_start = g.apply(lambda x: x.index[-1])
+        session_end = last_start.dt.normalize() + pd.Timedelta(hours=15, minutes=30)
+        closes = (last_start + pd.Timedelta(hours=1)).where(last_start + pd.Timedelta(hours=1) <= session_end, session_end)
+        h, l, c = (bars[k].to_numpy(np.float64) for k in ("high", "low", "close"))
+        tr, _, _ = _supertrend(c, h, l, _atr_rma(h, l, c, ATR_PERIOD), MULTIPLIER)
+        out[name] = (closes.astype("int64").to_numpy(), tr.astype(np.int8))
+    return out
+
+
+def htf_at(htf, frame, ts):
+    """Higher-timeframe trend (1 / -1, 0 if unknown) as of `ts` (tz-aware
+    Timestamp), from the last candle of that frame that had closed by then."""
+    if not htf or frame not in htf:
+        return 0
+    closes, tr = htf[frame]
+    k = int(np.searchsorted(closes, ts.value, side="right")) - 1
+    return int(tr[k]) if k >= 0 else 0
+
+
+def _download(symbol, yf_ticker, period, interval="15m"):
     """One Yahoo download with exponential-backoff retry on rate limiting."""
     last_err = None
     for attempt in range(RETRY_MAX):
         try:
             ticker = yf.Ticker(yf_ticker, session=SESSION) if SESSION else yf.Ticker(yf_ticker)
-            df = ticker.history(period=period, interval="15m")
+            df = ticker.history(period=period, interval=interval)
             if df.empty:
                 return None
             df = df.rename(columns=str.lower)
@@ -536,13 +602,15 @@ def format_alert(fired, confirmed=(), html=True):
     return "\n\n".join(sections)
 
 
-TELEGRAM_MODE = os.environ.get("TELEGRAM_MODE", "all").strip().lower() or "all"
+TELEGRAM_MODE = os.environ.get("TELEGRAM_MODE", "gated").strip().lower() or "gated"
 TELEGRAM_UNTIL = os.environ.get("TELEGRAM_UNTIL", "").strip()  # e.g. "14:00": no alerts after that
 
 
-def telegram_filter(fired, confirmed, now=None):
+def telegram_filter(fired, confirmed, now=None, gate_flags=None):
     """Apply the Telegram mode (the dashboard always shows everything):
-      all       — every signal + double confirmations (default)
+      gated     — only signals whose 2-hour AND daily trend agree, plus double
+                  confirmations that pass both gates (default)
+      all       — every signal + double confirmations
       confirmed — double confirmations + index signals only
     and TELEGRAM_UNTIL, a cut-off time after which nothing is sent."""
     now = now or datetime.now(IST)
@@ -555,10 +623,14 @@ def telegram_filter(fired, confirmed, now=None):
             print(f"[warn] TELEGRAM_UNTIL={TELEGRAM_UNTIL!r} isn't HH:MM — ignoring it")
     if TELEGRAM_MODE == "confirmed":
         return [f for f in fired if f[1] in INDEX_TICKERS], list(confirmed)
+    if TELEGRAM_MODE == "gated" and gate_flags:
+        ok = lambda name, label: all(gate_flags(name, label).values())  # noqa: E731
+        return ([f for f in fired if ok(f[1], f[2])],
+                [c for c in confirmed if ok(c[0], "SELL" if c[1] == "sell" else "BUY")])
     return list(fired), list(confirmed)
 
 
-def notify_signals(fired, confirmed=()):
+def notify_signals(fired, confirmed=(), gate_flags=None):
     """Send one scan's signals: Telegram digest, console, desktop popup."""
     if not fired and not confirmed:
         return
@@ -568,7 +640,7 @@ def notify_signals(fired, confirmed=()):
         print(f"[signal] {len(fired)} fired (details hidden from CI logs — see Telegram / dashboard)")
     else:
         print("\n" + format_alert(fired, confirmed, html=False) + "\n")
-    tg_fired, tg_conf = telegram_filter(fired, confirmed)
+    tg_fired, tg_conf = telegram_filter(fired, confirmed, gate_flags=gate_flags)
     if tg_fired or tg_conf:
         send_telegram(format_alert(tg_fired, tg_conf))  # before the popup, which blocks
     if DESKTOP_NOTIFY:
@@ -756,19 +828,22 @@ function filterer(tbodySel,countSel){const rows=$$(tbodySel+' tr[data-sym]'),f={
   r.style.display=ok?'':'none';n+=ok}
   if(countSel)$(countSel).textContent=n+' shown';const e=$(tbodySel+' .nores');if(e)e.style.display=n?'none':'';};
  return {set(k,v){f[k]=v;run()},run}}
-const VIEWS={all:()=>true,fav:d=>FAV.has(d.sym),stale:d=>d.stale==='1',aligned:d=>(d.st==='1'&&+d.adx>0)||(d.st==='-1'&&+d.adx<0),near:d=>+d.dist<=NEAR,
+const VIEWS={all:()=>true,fav:d=>FAV.has(d.sym),stale:d=>d.stale==='1',mtf:d=>d.st!=='0'&&d.st===d.tf2&&d.st===d.tf1,aligned:d=>(d.st==='1'&&+d.adx>0)||(d.st==='-1'&&+d.adx<0),near:d=>+d.dist<=NEAR,
  long:d=>d.st==='1',short:d=>d.st==='-1',abuy:d=>+d.adx>0,asell:d=>+d.adx<0};
 const live=filterer('#t-live tbody');seg($('#f-live-dir'),v=>live.set('dir',v));
+seg($('#f-live-gate'),v=>live.set('gate',v==='all'?'all':'both'));live.set('gate','both');
 /* shared archive (ARCH/NAMES/PX/PDAYS come from the data script).
    ARCH row: [time, name#, label, strategy 0 ST/1 ADX/2 CONFIRMED, price, exit, bars, open, max gain, max drawdown] */
 const SN=['SuperTrend','ADX_DI','CONFIRMED'];
 const CONF=new Set(ARCH.filter(r=>r[3]===2).map(r=>r[0].slice(0,10)+'|'+r[1]));
 const mvOf=r=>{const px=r[7]?PX[r[1]]:r[5];if(!px||!r[4])return null;const m=(px/r[4]-1)*100;return r[2].includes('SELL')?-m:m};
 /* past signals, drawn per selected day:
-   [time, name, label, strategy, price, exit, move, bars, open, confirmed, max gain, max drawdown] */
+   [time, name, label, strategy, price, exit, move, bars, open, confirmed, max gain, max drawdown, 2H gate, 1D gate] */
 const PAST=ARCH.filter(r=>r[3]<2&&PDAYS.has(r[0].slice(0,10))).reverse().map(r=>[r[0],NAMES[r[1]],r[2],SN[r[3]],r[4],
- r[7]?null:r[5],mvOf(r),r[6],r[7],CONF.has(r[0].slice(0,10)+'|'+r[1])?1:0,r[8],r[9]]);
-const PT=$('#t-past tbody'),pf={day:'',dir:'all',strat:'all',conf:false,sym:'',sess:'',str:'all',fav:false};let pk='t',pa=false;
+ r[7]?null:r[5],mvOf(r),r[6],r[7],CONF.has(r[0].slice(0,10)+'|'+r[1])?1:0,r[8],r[9],r[12],r[13]]);
+const gb=(g2,g1)=>'<span class="tag '+(g2?'ok':'mute')+'">2H</span> <span class="tag '+(g1?'ok':'mute')+'">1D</span>';
+const gateOk=(g,g2,g1)=>g==='all'||(g==='2h'?!!g2:!!(g2&&g1));
+const PT=$('#t-past tbody'),pf={day:'',dir:'all',strat:'all',conf:false,sym:'',sess:'',str:'all',fav:false,gate:'both'};let pk='t',pa=false;
 const fp=v=>v==null?'—':v.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
 const tg=l=>'<span class="tag '+(l.includes('SELL')?'dn':'up')+'">'+l.replace('_',' ')+'</span>';
 const pc=v=>v==null?'<span class="fa">—</span>':Math.abs(v)<0.005?'<span class="mu">0.00%</span>':
@@ -779,15 +854,15 @@ const dshort=t=>+t.slice(8,10)+' '+MON[+t.slice(5,7)-1];
 const bt=(b,o)=>b==null?'—':o?(b===0?'<span class="tag ok">new</span>':'<span class="mu">'+b+'+</span>'):b;
 function renderPast(){const rows=PAST.filter(r=>r[0].startsWith(pf.day)&&(pf.dir==='all'||(pf.dir==='sell')===r[2].includes('SELL'))
  &&(pf.strat==='all'||r[3]===pf.strat)&&(!pf.conf||r[9])&&(!pf.sym||r[1]===pf.sym)&&(!pf.fav||FAV.has(r[1]))
- &&(pf.str==='all'||(pf.str==='strong')===r[2].endsWith('STRONG'))
+ &&(pf.str==='all'||(pf.str==='strong')===r[2].endsWith('STRONG'))&&gateOk(pf.gate,r[12],r[13])
  &&(!pf.sess||(r[0].slice(11,16)>=pf.sess.slice(0,5)&&r[0].slice(11,16)<pf.sess.slice(6))));
  const i={t:0,sym:1,mv:6,bars:7,mfe:10,mae:11}[pk];rows.sort((a,b)=>{const x=a[i],y=b[i];
   const v=typeof x==='string'?x.localeCompare(y):(x??-999)-(y??-999);return pa?v:-v});
  PT.innerHTML=rows.map(r=>'<tr><td class="mu">'+(pf.day?'':dshort(r[0])+', ')+t12(r[0])+'</td><td>'+tvA(r[1])+(r[9]?' <span class="tag ok">✓</span>':'')+
-  '</td><td>'+tg(r[2])+'</td><td class="mu hide-md">'+(r[3]==='SuperTrend'?'SuperTrend':'ADX DI')+'</td><td class="r hide-sm">'+fp(r[4])+
+  '</td><td>'+tg(r[2])+'</td><td>'+gb(r[12],r[13])+'</td><td class="mu hide-md">'+(r[3]==='SuperTrend'?'SuperTrend':'ADX DI')+'</td><td class="r hide-sm">'+fp(r[4])+
   '</td><td class="r hide-md">'+(r[8]?'<span class="fa">open</span>':fp(r[5]))+'</td><td class="r">'+pc(r[6])+'</td><td class="r">'+pc(r[10])+'</td><td class="r hide-sm">'+pc(r[11])+
   '</td><td class="r">'+bt(r[7],r[8])+'</td></tr>').join('')
-  ||'<tr><td colspan="10" class="empty">No signals match these filters.</td></tr>';
+  ||'<tr><td colspan="11" class="empty">No signals match these filters.</td></tr>';
  $('#c-past').textContent=rows.length+' shown';}
 $$('#t-past th[data-k]').forEach(th=>th.onclick=()=>{const k=th.dataset.k;pa=k===pk?!pa:th.dataset.asc==='1';pk=k;
  $$('#t-past th').forEach(x=>x.classList.remove('sorted','desc'));th.classList.add('sorted');if(!pa)th.classList.add('desc');renderPast()});
@@ -797,7 +872,7 @@ seg($('#f-past-dir'),v=>{pf.dir=v;renderPast()});seg($('#f-past-strat'),v=>{pf.s
 $('#f-past-conf').onchange=e=>{pf.conf=e.target.checked;renderPast()};
 $('#f-past-sym').onchange=e=>{pf.sym=e.target.value;renderPast()};
 $('#f-past-sess').onchange=e=>{pf.sess=e.target.value;renderPast()};
-seg($('#f-past-str'),v=>{pf.str=v;renderPast()});
+seg($('#f-past-str'),v=>{pf.str=v;renderPast()});seg($('#f-past-gate'),v=>{pf.gate=v;renderPast()});
 $('#f-past-fav').onchange=e=>{pf.fav=e.target.checked;renderPast()};
 daySel.onchange();
 /* accuracy: overall or for one stock / index */
@@ -815,11 +890,23 @@ function accRow(tag,rows){const a=stats(rows);
  return '<tr><td>'+tg(tag)+'</td><td class="r">'+a.n+'</td><td class="r hide-sm">'+a.closed+'</td><td>'+win+'</td><td class="r">'+
   num(a.bars)+'</td><td class="r">'+pc(a.move)+'</td><td class="r">'+pc(a.mfe)+'</td><td class="r">'+pc(a.mae)+
   '</td><td class="r hide-sm">'+pc(a.avg)+'</td><td class="r hide-sm">'+a.open+' · '+pc(a.open_move)+'</td></tr>'}
-function renderAcc(sym){const ni=sym?NAMES.indexOf(sym):-1;const rows=sym?ARCH.filter(r=>r[1]===ni):ARCH;
+let accGate='all';
+function funnelRow(label,rows,days){const a=stats(rows);
+ const wr=a.win==null?'<span class="fa">—</span>':'<div class="wr"><span style="min-width:38px">'+a.win.toFixed(0)+'%</span><span class="tr"><b class="'+(a.win<50?'lo':'')+'" style="width:'+a.win.toFixed(0)+'%"></b></span></div>';
+ return '<tr><td>'+label+'</td><td class="r">'+a.n+'</td><td class="r">'+(days?(a.n/days).toFixed(1):'—')+'</td><td>'+wr+'</td><td class="r">'+pc(a.avg)+
+  '</td><td class="r">'+pc(a.move)+'</td><td class="r hide-sm">'+pc(a.mfe)+'</td><td class="r hide-sm">'+pc(a.mae)+'</td></tr>'}
+function renderFunnel(all){const days=new Set(all.map(r=>r[0].slice(0,10))).size,s=all.filter(r=>r[3]<2),c=all.filter(r=>r[3]===2),grp=t=>'<tr class="grp"><td colspan="8">'+t+'</td></tr>';
+ const stage=rows=>[['① 15-min signal',rows],['② + 2-hour trend agrees',rows.filter(r=>r[12])],['③ + daily trend agrees',rows.filter(r=>r[12]&&r[13])],
+  ['<span class="mu">filtered out: both disagree</span>',rows.filter(r=>!r[12]&&!r[13])]];
+ $('#acc-funnel').innerHTML=grp('All strategy signals')+stage(s).map(([l,r])=>funnelRow(l,r,days)).join('')+
+  grp('Double confirmations')+stage(c).map(([l,r])=>funnelRow(l,r,days)).join('')}
+function renderAcc(sym){const ni=sym?NAMES.indexOf(sym):-1;const scoped=sym?ARCH.filter(r=>r[1]===ni):ARCH;renderFunnel(scoped);
+ const rows=scoped.filter(r=>gateOk(accGate,r[12],r[13]));
  const sig=rows.filter(r=>r[3]<2),cf=rows.filter(r=>r[3]===2),all=stats(sig),con=stats(cf);
  const days=[...new Set(sig.map(r=>r[0].slice(0,10)))].sort();
  $('#acc-span').textContent=days.length?dshort(days[0])+' – '+dshort(days[days.length-1])+' · '+days.length+' sessions':'no signals';
- $('#acc-what').textContent=sym?'Accuracy for '+sym+' only':'All '+NAMES.length+' stocks & indices';
+ $('#acc-what').textContent=(sym?'Accuracy for '+sym+' only':'All '+NAMES.length+' stocks & indices')+
+  (accGate==='all'?'':accGate==='2h'?' · signals passing the 2-hour gate':' · signals passing the 2-hour + daily gates');
  $('#acc-kpis').innerHTML=kpi('Signals tracked',all.n,all.closed+' closed · '+all.open+' open')+
   kpi('Win rate (closed)',num(all.win,0,'%'),'moved in the signal’s favour by its flip')+
   kpi('Median bars to flip',num(all.bars),'≈ '+(all.bars==null?'—':(all.bars*15/60).toFixed(1)+' h')+' of trading')+
@@ -887,7 +974,8 @@ function renderLeaders(sig){const g={};for(const r of sig)(g[r[1]]=g[r[1]]||[]).
   (bot.length?'<tr class="grp"><td colspan="5">Worst</td></tr>'+bot.map(row).join(''):''):'<tr><td colspan="5" class="empty">Not enough closed signals yet.</td></tr>'}
 let accRows=ARCH;
 [simT,simS].forEach(el=>el.onchange=()=>renderSim(accRows));
-const accSel=$('#f-acc-sym');accSel.onchange=()=>{renderAcc(accSel.value);try{localStorage.setItem('accsym',accSel.value)}catch(e){}};
+const accSel=$('#f-acc-sym');
+seg($('#f-acc-gate'),v=>{accGate=v;renderAcc(accSel.value)});accSel.onchange=()=>{renderAcc(accSel.value);try{localStorage.setItem('accsym',accSel.value)}catch(e){}};
 try{const v=localStorage.getItem('accsym');if(v&&[...accSel.options].some(o=>o.value===v))accSel.value=v}catch(e){}
 renderAcc(accSel.value);
 const stk=filterer('#t-stocks tbody','#c-stocks');seg($('#f-stk-view'),v=>stk.set('view',v));
@@ -985,6 +1073,16 @@ def _st_tag(st):
 def _adx_tag(adx):
     label = ADX_LABELS.get(adx, "—")
     return _tag(label) if adx else '<span class="fa">—</span>'
+
+
+def _gate_tags(g2, g1):
+    """Stage-gate badges: 2H / 1D lit when that timeframe's trend agrees."""
+    return (f'<span class="tag {"ok" if g2 else "mute"}" title="2-hour trend {"agrees" if g2 else "does not agree"}">2H</span> '
+            f'<span class="tag {"ok" if g1 else "mute"}" title="Daily trend {"agrees" if g1 else "does not agree"}">1D</span>')
+
+
+def _tf_tag(v):
+    return {1: _tag("UP", "up"), -1: _tag("DOWN", "dn")}.get(v, '<span class="fa">—</span>')
 
 
 def _strat_name(strategy):
@@ -1108,7 +1206,9 @@ def write_dashboard(state):
             f'<div class="px">{_fmt_price(info.get("last_close"))}</div>'
             f'<div class="ft">{_pct(info.get("day_chg_pct"))}'
             f'<span class="sm">{dist_txt}</span></div>'
-            f'<div class="tags">{_st_tag(info.get("st_trend"))}{_adx_tag(info.get("adx_cond"))}</div></div>')
+            f'<div class="tags">{_st_tag(info.get("st_trend"))}{_adx_tag(info.get("adx_cond"))}</div>'
+            f'<div class="tags" title="2-hour / daily SuperTrend"><span class="sm">2H</span>{_tf_tag(info.get("tf2h"))}'
+            f'<span class="sm">1D</span>{_tf_tag(info.get("tf1d"))}</div></div>')
 
     # ── live: today's signals + confirmations
     latest_day = log[-1]["time"][:10] if log else None
@@ -1124,10 +1224,24 @@ def write_dashboard(state):
         t = (u + d) or 1
         return f'<div class="split"><b style="width:{u / t * 100:.1f}%"></b><i style="width:{d / t * 100:.1f}%"></i></div>'
 
+    def now_move(s):
+        mv, _ = outcome({**s, "open": True}, _current_price(state, s["name"]))
+        return mv
+
+    def live_gates(name, label, rec=None):
+        """Gate flags recorded with a live alert, else today's HTF trends."""
+        if rec and "g2" in rec:
+            return bool(rec["g2"]), bool(rec["g1"])
+        info = state.get(name) or state.get(INDEX_STATE_PREFIX + name) or {}
+        want = -1 if "SELL" in label else 1
+        return info.get("tf2h") == want, info.get("tf1d") == want
+
+    n_gated = sum(1 for s in today if all(live_gates(s["name"], s["label"], s)))
     kpis = (
         f'<div class="panel kpi"><div class="k">Signals {"today" if latest_day else ""}</div>'
         f'<div class="v">{len(today)}</div><div class="s"><span class="up">{n_buy} buy</span> · '
-        f'<span class="dn">{len(today) - n_buy} sell</span></div>{split(n_buy, len(today) - n_buy)}</div>'
+        f'<span class="dn">{len(today) - n_buy} sell</span> · <b>{n_gated}</b> pass both gates</div>'
+        f'{split(n_buy, len(today) - n_buy)}</div>'
         f'<div class="panel kpi"><div class="k">Double confirmations</div><div class="v">{len(conf_today)}</div>'
         f'<div class="s"><span class="up">{sum(c["dir"] == "buy" for c in conf_today)} buy</span> · '
         f'<span class="dn">{sum(c["dir"] == "sell" for c in conf_today)} sell</span></div></div>'
@@ -1138,9 +1252,6 @@ def write_dashboard(state):
         f'<span class="mu" style="font-size:14px"> / {adx_sell}</span></div><div class="s">buy / sell state</div>'
         f'{split(adx_buy, adx_sell)}</div>')
 
-    def now_move(s):
-        mv, _ = outcome({**s, "open": True}, _current_price(state, s["name"]))
-        return mv
 
     def excursion_cells(h):
         if not h:
@@ -1149,7 +1260,7 @@ def write_dashboard(state):
 
     conf_rows = "".join(
         f'<tr data-sym="{e(c["name"])}"><td>{_tv(c["name"])}</td>'
-        f'<td>{_tag("CONFIRMED " + c["dir"].upper())}</td>'
+        f'<td>{_tag("CONFIRMED " + c["dir"].upper())}</td><td>{_gate_tags(*live_gates(c["name"], c["dir"].upper()))}</td>'
         f'<td>{_tag(c["st"]["label"])} <span class="mu">{e(fmt_time(c["st"]["time"]))}</span></td>'
         f'<td>{_tag(c["adx"]["label"])} <span class="mu">{e(fmt_time(c["adx"]["time"]))}</span></td>'
         f'<td class="r">{_fmt_price(c["price"])}</td><td class="r">{_fmt_price(_current_price(state, c["name"]))}</td>'
@@ -1157,9 +1268,11 @@ def write_dashboard(state):
         f'{excursion_cells(_match_replay(archive, c["name"], ("CONFIRMED",), c["dir"], latest_day))}</tr>'
         for c in conf_today)
     live_rows = "".join(
-        f'<tr data-sym="{e(s["name"])}" data-dir="{_direction(s["label"])}"'
+        f'<tr data-sym="{e(s["name"])}" data-dir="{_direction(s["label"])}" '
+        f'data-gate="{"both" if all(live_gates(s["name"], s["label"], s)) else "no"}"'
         f'{" class=fresh" if s["time"] == scan_time else ""}>'
         f'<td class="mu">{e(fmt_time(s["time"]))}</td><td>{_tv(s["name"])}</td><td>{_tag(s["label"])}</td>'
+        f'<td>{_gate_tags(*live_gates(s["name"], s["label"], s))}</td>'
         f'<td class="mu hide-sm">{_strat_name(s["strategy"])}</td><td class="r">{_fmt_price(s["price"])}</td>'
         f'<td class="r">{_pct(now_move(s))}</td>'
         f'{excursion_cells(_match_replay(archive, s["name"], (s["strategy"],), _direction(s["label"]), s["time"][:10], s["time"]))}</tr>'
@@ -1181,7 +1294,7 @@ def write_dashboard(state):
     arch_rows = [[h["time"], name_ix[h["name"]], h["label"], strat_code[h["strategy"]], round(h["price"], 2),
                   round(h["exit_price"], 2) if h.get("exit_price") else None, h.get("bars"),
                   1 if h.get("open", True) else 0, h.get("mfe"), h.get("mae"),
-                  h.get("hf") or [], h.get("ha") or []]
+                  h.get("hf") or [], h.get("ha") or [], int(bool(h.get("g2"))), int(bool(h.get("g1")))]
                  for h in sorted(archive, key=lambda x: x["time"])]
     prices = {name_ix[n]: _current_price(state, n) for n in names}
     data_js = ("const NAMES=" + json.dumps(names) + ";const ARCH=" + json.dumps(arch_rows, separators=(",", ":"))
@@ -1261,10 +1374,12 @@ def write_dashboard(state):
             f'<tr data-sym="{e(sym)}" data-sector="{e(sector)}" data-stale="{int(sym in stale)}" '
             f'data-st="{st}" data-adx="{adx}" data-dist="{dist if dist is not None else 999}" '
             f'data-chg="{chg if chg is not None else 0}" data-px="{info.get("last_close") or 0}" '
-            f'data-mv="{mv if mv is not None else -999}"{" class=fresh" if sym in fresh else ""}>'
+            f'data-mv="{mv if mv is not None else -999}" data-tf2="{info.get("tf2h", 0)}" data-tf1="{info.get("tf1d", 0)}"'
+            f'{" class=fresh" if sym in fresh else ""}>'
             f'<td><button class="star" data-fav="{e(sym)}" aria-label="Favourite">☆</button>{_tv(sym)}{stale_tag}</td>'
             f'<td class="mu hide-md">{e(sector)}</td><td class="r">{_fmt_price(info.get("last_close"))}</td>'
-            f'<td class="r">{_pct(chg)}</td><td>{_st_tag(st)}</td><td>{_adx_tag(adx)}</td>'
+            f'<td class="r">{_pct(chg)}</td><td>{_st_tag(st)}</td><td>{_tf_tag(info.get("tf2h"))}</td>'
+            f'<td>{_tf_tag(info.get("tf1d"))}</td><td>{_adx_tag(adx)}</td>'
             f'<td class="r">{dist_s}</td>'
             f'<td>{(_tag(ls["label"]) + " " + _pct(mv) + "<div class=sm>" + e(fmt_stamp(ls["time"])) + max_txt + "</div>") if ls else "<span class=fa>—</span>"}</td></tr>')
 
@@ -1328,11 +1443,13 @@ stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
 <div class="kpis">{kpis}</div>
 <section><div class="sh"><h2>Double confirmations</h2><span class="meta">{e(fmt_day(latest_day)) if latest_day else ""}</span></div>
 <p class="note">SuperTrend and ADX DI gave the same signal on the same day — the latest signal of each counts.</p>
-{table("t-conf", '<th>Stock</th><th>Setup</th><th>SuperTrend</th><th>ADX DI</th><th class="r">At signal</th><th class="r">Now</th><th class="r">Move</th><th class="r">Max gain</th><th class="r hide-sm">Max drawdown</th>',
+{table("t-conf", '<th>Stock</th><th>Setup</th><th>Gates</th><th>SuperTrend</th><th>ADX DI</th><th class="r">At signal</th><th class="r">Now</th><th class="r">Move</th><th class="r">Max gain</th><th class="r hide-sm">Max drawdown</th>',
        conf_rows, "No double confirmations today yet.")}</section>
-<section><div class="sh"><h2>Today's signals</h2><div class="seg" id="f-live-dir"><button class="on" data-f="all">All</button>
-<button data-f="buy">Buy</button><button data-f="sell">Sell</button></div></div>
-{table("t-live", '<th>Time</th><th>Stock</th><th>Signal</th><th class="hide-sm">Strategy</th><th class="r">Price</th><th class="r">Move</th><th class="r">Max gain</th><th class="r hide-sm">Max drawdown</th>',
+<section><div class="sh"><h2>Today's signals</h2><div class="tb" style="margin:0">
+<div class="seg" id="f-live-gate"><button data-f="all">All</button><button class="on" data-f="both" title="2-hour and daily trend agree">Gated (2H + 1D)</button></div>
+<div class="seg" id="f-live-dir"><button class="on" data-f="all">All</button>
+<button data-f="buy">Buy</button><button data-f="sell">Sell</button></div></div></div>
+{table("t-live", '<th>Time</th><th>Stock</th><th>Signal</th><th>Gates</th><th class="hide-sm">Strategy</th><th class="r">Price</th><th class="r">Move</th><th class="r">Max gain</th><th class="r hide-sm">Max drawdown</th>',
        live_rows, "No signals yet today — they appear here as each scan finds them.")}</section>
 </div>
 
@@ -1344,26 +1461,33 @@ stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
 <select class="sel" id="f-past-sess" aria-label="Time of day"><option value="">All day</option>
 <option value="09:15-11:00">9:15 – 11 AM</option><option value="11:00-14:00">11 AM – 2 PM</option>
 <option value="14:00-15:30">2 – 3:30 PM</option></select>
+<div class="seg" id="f-past-gate"><button data-f="all">All</button><button data-f="2h">2H gate</button><button class="on" data-f="both" title="2-hour and daily trend agree">2H + 1D</button></div>
 <div class="seg" id="f-past-str"><button class="on" data-f="all">Any strength</button><button data-f="strong">Strong</button><button data-f="normal">Not strong</button></div>
 <label class="chk"><input type="checkbox" id="f-past-conf"> Confirmed only</label>
 <label class="chk"><input type="checkbox" id="f-past-fav"> ★ only</label>
 <select class="sel" id="f-past-sym" aria-label="Stock or index">{past_sym_opts}</select></div>
 {"".join(day_sums)}
-{table("t-past", '<th class="sorted desc" data-k="t" data-asc="0">Time</th><th data-k="sym" data-asc="1">Stock</th><th>Signal</th><th class="hide-md">Strategy</th><th class="r hide-sm">Price</th><th class="r hide-md">Exit</th><th class="r" data-k="mv" data-asc="0">Move</th><th class="r" data-k="mfe" data-asc="0">Max gain</th><th class="r hide-sm" data-k="mae" data-asc="1">Max drawdown</th><th class="r" data-k="bars" data-asc="1">Bars</th>',
+{table("t-past", '<th class="sorted desc" data-k="t" data-asc="0">Time</th><th data-k="sym" data-asc="1">Stock</th><th>Signal</th><th>Gates</th><th class="hide-md">Strategy</th><th class="r hide-sm">Price</th><th class="r hide-md">Exit</th><th class="r" data-k="mv" data-asc="0">Move</th><th class="r" data-k="mfe" data-asc="0">Max gain</th><th class="r hide-sm" data-k="mae" data-asc="1">Max drawdown</th><th class="r" data-k="bars" data-asc="1">Bars</th>',
        "", "No signals match these filters.")}
 <p class="note below">Every signal from the last {HISTORY_DAYS} sessions, replayed bar by bar from 15-minute data. Time = the
 15-min candle the signal formed on (labelled by its start, like TradingView); <b>Move</b> = price change in the signal's favour
 up to its flip (or to now if still open); <b>Max gain</b> / <b>Max drawdown</b> = furthest price went in the signal's favour /
 against it before the flip; <b>Bars</b> = 15-min bars until that strategy flipped (SuperTrend reversed / ADX left that side).
-✓ = part of a double confirmation that day.</p>
+✓ = part of a double confirmation that day. <b>Gates</b>: <b>2H</b> / <b>1D</b> light up when the 2-hour / daily
+SuperTrend (last candle closed before the signal) points the same way; "2H + 1D" keeps only signals where both agree.</p>
 </div>
 
 <div class="view" id="v-accuracy">
 <div class="sh"><h2>Accuracy tracker</h2><span class="meta" id="acc-span">{e(span)}</span></div>
 <div class="tb"><select class="sel" id="f-acc-sym" aria-label="Stock or index">{sym_opts}</select>
+<div class="seg" id="f-acc-gate"><button class="on" data-f="all">All signals</button><button data-f="2h">2H gate</button><button data-f="both">2H + 1D gate</button></div>
 <span class="mu" id="acc-what" style="font-size:12px"></span></div>
 <div class="kpis" id="acc-kpis"></div>
 <div class="kpis k3" id="acc-k3"></div>
+<section><div class="sh"><h2>Stage-gate funnel</h2><span class="meta">how many signals survive each gate, and how they performed</span></div>
+<div class="panel tw"><table><thead><tr><th>Stage</th><th class="r">Signals</th><th class="r">Per session</th><th>Win rate</th>
+<th class="r">Avg move</th><th class="r">Median move</th><th class="r hide-sm">Median max gain</th><th class="r hide-sm">Median max drawdown</th></tr></thead>
+<tbody id="acc-funnel"></tbody></table></div></section>
 <div class="panel tw"><table><thead><tr><th>Signal</th><th class="r">Signals</th><th class="r hide-sm">Closed</th>
 <th>Win rate</th><th class="r">Median bars</th><th class="r">Median move</th><th class="r">Median max gain</th>
 <th class="r">Median max drawdown</th><th class="r hide-sm">Avg move</th>
@@ -1406,16 +1530,16 @@ Ignores brokerage, taxes and slippage.</p>
 <div class="sh"><h2>All stocks</h2><span class="meta" id="c-stocks"></span></div>
 <div class="tb"><input type="search" id="f-stk-q" placeholder="Search stock…" autocomplete="off">
 <select class="sel" id="f-stk-sector" aria-label="Sector">{sector_opts}</select>
-<div class="seg" id="f-stk-view"><button class="on" data-f="all">All</button><button data-f="fav" title="Your starred stocks">★</button><button data-f="aligned" title="SuperTrend and ADX DI point the same way">Aligned</button>
+<div class="seg" id="f-stk-view"><button class="on" data-f="all">All</button><button data-f="fav" title="Your starred stocks">★</button><button data-f="mtf" title="15-min, 2-hour and daily SuperTrend all point the same way">All TFs aligned</button><button data-f="aligned" title="SuperTrend and ADX DI point the same way">Aligned</button>
 <button data-f="near" title="Within {WATCHLIST_PCT:g}% of a SuperTrend flip">Near flip</button><button data-f="long">ST long</button>
 <button data-f="short">ST short</button><button data-f="abuy">ADX buy</button><button data-f="asell">ADX sell</button>
 <button data-f="stale" title="Latest candle older than the rest">Stale</button></div></div>
-{table("t-stocks", '<th data-k="sym" data-asc="1">Stock</th><th class="hide-md" data-k="sector" data-asc="1">Sector</th><th class="r" data-k="px" data-asc="0">Price</th><th class="r" data-k="chg" data-asc="0">Day</th><th data-k="st" data-asc="0">SuperTrend</th><th data-k="adx" data-asc="0">ADX DI</th><th class="r sorted" data-k="dist" data-asc="1">To flip</th><th data-k="mv" data-asc="0">Last signal</th>',
+{table("t-stocks", '<th data-k="sym" data-asc="1">Stock</th><th class="hide-md" data-k="sector" data-asc="1">Sector</th><th class="r" data-k="px" data-asc="0">Price</th><th class="r" data-k="chg" data-asc="0">Day</th><th data-k="st" data-asc="0">SuperTrend</th><th data-k="tf2" data-asc="0" title="2-hour SuperTrend">2H</th><th data-k="tf1" data-asc="0" title="Daily SuperTrend">1D</th><th data-k="adx" data-asc="0">ADX DI</th><th class="r sorted" data-k="dist" data-asc="1">To flip</th><th data-k="mv" data-asc="0">Last signal</th>',
        "".join(stock_rows), "No stocks match.", "dist")}
 </div>
 
 <div class="foot">All times IST. Data: Yahoo Finance (~15 min delayed); this page refreshes every 5 minutes.
-SELL signals and the accuracy figures are not from the original backtests. Not investment advice.</div>
+SELL signals, the stage gates and the accuracy figures are not from the original backtests. Not investment advice.</div>
 </main>
 <script>{data_js}</script>
 <script>const NEAR={WATCHLIST_PCT};{DASHBOARD_JS}</script></body></html>"""
@@ -1451,9 +1575,10 @@ MIN_SCAN_GAP = 8 * 60       # --once: a run this soon after the last scan is a d
 INDEX_STATE_PREFIX = "__INDEX__"  # state keys for indices, kept apart from stocks
 
 
-def evaluate(name, df, prev):
+def evaluate(name, df, prev, htf=None):
     """Run both strategies on one bar series. Returns (new_state, fired) where
-    fired lists the signals that changed since `prev` (last cycle's state)."""
+    fired lists the signals that changed since `prev` (last cycle's state).
+    `htf` (from htf_trends) adds the 2-hour / daily trend gates."""
     h = df["high"].to_numpy(dtype=np.float64)
     l = df["low"].to_numpy(dtype=np.float64)
     c = df["close"].to_numpy(dtype=np.float64)
@@ -1495,7 +1620,9 @@ def evaluate(name, df, prev):
     new_state = {"st_trend": st_trend, "adx_cond": adx_cond, "last_ts": last_ts,
                  "last_close": last_close, "distance_pct": distance_pct,
                  "day_chg_pct": day_chg_pct, "name": name,
-                 "history": bar_signals(name, df, c, trend, condition),
+                 "tf2h": htf_at(htf, "2h", df.index[-1] + pd.Timedelta(minutes=15)),
+                 "tf1d": htf_at(htf, "1d", df.index[-1] + pd.Timedelta(minutes=15)),
+                 "history": bar_signals(name, df, c, trend, condition, htf),
                  "history_from": str(df.index[np.isin(dates, sorted(set(dates))[-REPLAY_DAYS:])][0])}
     return new_state, fired
 
@@ -1507,7 +1634,7 @@ ARCHIVE_KEY = "__ARCHIVE__"
 ARCHIVE_KEEP_DAYS = 30   # calendar days of replayed signals kept for the accuracy tracker
 
 
-def bar_signals(name, df, close, trend, condition):
+def bar_signals(name, df, close, trend, condition, htf=None):
     """Every signal the strategies gave, bar by bar, over the last REPLAY_DAYS
     trading days in `df` — the same state changes the live scan alerts on, but
     replayed on completed bars. "time" is the 15-min candle the signal formed
@@ -1553,6 +1680,13 @@ def bar_signals(name, df, close, trend, condition):
             return out
         return hits(fav), hits(adv)
 
+    def gates(i, buy):
+        """Stage gates at the signal: did the 2-hour / daily trend (last candle
+        closed by this candle's close) point the same way?"""
+        t = df.index[i] + pd.Timedelta(minutes=15)
+        want = 1 if buy else -1
+        return {"g2": htf_at(htf, "2h", t) == want, "g1": htf_at(htf, "1d", t) == want}
+
     def entry(i, end, still_open, strategy, label):
         buy = "SELL" not in label
         if end > i:
@@ -1569,7 +1703,7 @@ def bar_signals(name, df, close, trend, condition):
                 "exit_price": None if still_open else float(close[end]),
                 "exit_time": None if still_open else candle(end),
                 "mfe": round(float(max(mfe, 0.0)), 3), "mae": round(float(min(mae, 0.0)), 3),
-                "hf": hf, "ha": ha, "_i": int(i), "_end": int(end)}
+                "hf": hf, "ha": ha, **gates(i, buy), "_i": int(i), "_end": int(end)}
 
     dates = df.index.date
     days = sorted(set(dates))[-REPLAY_DAYS:]
@@ -1651,7 +1785,7 @@ def scan_indices(state):
             df = fetch_15m(name, yf_ticker)
             if df is None or len(df) < 60:
                 continue
-            state[key], index_fired = evaluate(name, df, state.get(key, {}))
+            state[key], index_fired = evaluate(name, df, state.get(key, {}), htf_trends(name, yf_ticker, df))
             archive_history(state, state[key])
             fired.extend(index_fired)
         except Exception as e:
@@ -1693,7 +1827,8 @@ def scan_once(per_symbol_delay=None):
             if df is None or len(df) < 60:
                 continue
 
-            state[symbol], symbol_fired = evaluate(symbol, df, state.get(symbol, {}))
+            state[symbol], symbol_fired = evaluate(symbol, df, state.get(symbol, {}),
+                                                   htf_trends(symbol, f"{symbol}.NS", df))
             archive_history(state, state[symbol])
             fired.extend(symbol_fired)
             checked += 1
@@ -1718,8 +1853,13 @@ def scan_once(per_symbol_delay=None):
 
     now_str = f"{datetime.now(IST):%Y-%m-%d %H:%M:%S}"
     log = state.get(SIGNAL_LOG_KEY, [])
+    def gate_flags(name, label):
+        info = state.get(name) or state.get(INDEX_STATE_PREFIX + name) or {}
+        want = -1 if "SELL" in label else 1
+        return {"g2": info.get("tf2h") == want, "g1": info.get("tf1d") == want}
     log.extend({"time": now_str, "strategy": strategy, "name": name, "label": label,
-                "price": price, "bar": ts} for strategy, name, label, price, ts in fired)
+                "price": price, "bar": ts, **gate_flags(name, label)}
+               for strategy, name, label, price, ts in fired)
     state[SIGNAL_LOG_KEY] = log[-SIGNAL_LOG_MAX:]
     sectors = {**state.get(SCAN_META_KEY, {}).get("sectors", {}), **SECTORS}
     state[SCAN_META_KEY] = {"time": now_str, "checked": checked, "total": len(universe), "sectors": sectors,
@@ -1735,7 +1875,7 @@ def scan_once(per_symbol_delay=None):
     confirmed = [(c["name"], c["dir"], c["price"])
                  for c in find_confluence(state[SIGNAL_LOG_KEY]).get(now_str[:10], [])
                  if c["time"] == now_str]
-    notify_signals(fired, confirmed)
+    notify_signals(fired, confirmed, gate_flags)
 
 
 def once_skip_reason(now, last_scan=None, probe=None):
