@@ -162,7 +162,7 @@ WATCHLIST_DELAY = 2   # seconds between watchlist symbols (still paced, just tig
 IST = ZoneInfo("Asia/Kolkata")
 STATE_FILE = Path(__file__).parent / "signal_state.json"
 POLL_SECONDS = 15 * 60  # re-scan every 15 min, matching the bar size
-FETCH_PERIOD = "15d"    # 15-min history per fetch: 10 sessions replayed + ~5 of indicator warm-up
+FETCH_PERIOD = "40d"    # 15-min history per fetch: 10 sessions replayed + ~30 of warm-up (EMA200 settles; checked vs 60d)
 
 ATR_PERIOD = 14
 MULTIPLIER = 3.0
@@ -400,7 +400,7 @@ def fetch_15m(symbol, yf_ticker=None):
         df = df[~df.index.duplicated(keep="last")].sort_index()
     elif df is None:
         return cached
-    keep = sorted(set(df.index.date))[-15:]
+    keep = sorted(set(df.index.date))[-40:]
     df = df[np.isin(df.index.date, keep)].copy()
     df.attrs["full_fetch"] = str(today)  # set last: attrs don't reliably survive concat/slicing
     cache[yf_ticker] = df
@@ -779,7 +779,7 @@ def format_alert(fired, confirmed=(), html=True):
 
     def line(sig):
         strategy, name, label, price, _ = sig
-        strat = "SuperTrend" if strategy == "SuperTrend" else "ADX DI"
+        strat = STRATEGY_NAMES.get(strategy, strategy)
         strong = " · Strong" if label.endswith("STRONG") else ""
         return f"{b(name)}  {px(name, price)}  ·  {strat}{strong}"
 
@@ -794,6 +794,9 @@ def format_alert(fired, confirmed=(), html=True):
             for name, d, price in sorted(confirmed)))
     return "\n\n".join(sections)
 
+
+STRATEGY_NAMES = {"SuperTrend": "SuperTrend", "ADX_DI": "ADX DI", "EMA_EARLY": "EMA 50×100",
+                  "EMA_GOLDEN": "EMA 50×200", "CONFIRMED": "Both"}
 
 TELEGRAM_MODE = os.environ.get("TELEGRAM_MODE", "gated").strip().lower() or "gated"
 TELEGRAM_UNTIL = os.environ.get("TELEGRAM_UNTIL", "").strip()  # e.g. "14:00": no alerts after that
@@ -1037,12 +1040,14 @@ const live=filterer('#t-live tbody');seg($('#f-live-dir'),v=>live.set('dir',v));
 seg($('#f-live-gate'),v=>live.set('gate',v==='all'?'all':'both'));live.set('gate','both');
 /* shared archive (ARCH/NAMES/PX/PDAYS come from the data script).
    ARCH row: [time, name#, label, strategy 0 ST/1 ADX/2 CONFIRMED, price, exit, bars, open, max gain, max drawdown] */
-const SN=['SuperTrend','ADX_DI','CONFIRMED'];
+const SN=['SuperTrend','ADX_DI','CONFIRMED','EMA_EARLY','EMA_GOLDEN'];
+const SNAME={SuperTrend:'SuperTrend',ADX_DI:'ADX DI',CONFIRMED:'Both',EMA_EARLY:'EMA 50×100',EMA_GOLDEN:'EMA 50×200'};
+const isSig=r=>r[3]!==2;
 const CONF=new Set(ARCH.filter(r=>r[3]===2).map(r=>r[0].slice(0,10)+'|'+r[1]));
 const mvOf=r=>{const px=r[7]?PX[r[1]]:r[5];if(!px||!r[4])return null;const m=(px/r[4]-1)*100;return r[2].includes('SELL')?-m:m};
 /* past signals, drawn per selected day:
    [time, name, label, strategy, price, exit, move, bars, open, confirmed, max gain, max drawdown, 1H gate] */
-const PAST=ARCH.filter(r=>r[3]<2&&PDAYS.has(r[0].slice(0,10))).reverse().map(r=>[r[0],NAMES[r[1]],r[2],SN[r[3]],r[4],
+const PAST=ARCH.filter(r=>isSig(r)&&PDAYS.has(r[0].slice(0,10))).reverse().map(r=>[r[0],NAMES[r[1]],r[2],SN[r[3]],r[4],
  r[7]?null:r[5],mvOf(r),r[6],r[7],CONF.has(r[0].slice(0,10)+'|'+r[1])?1:0,r[8],r[9],r[12]]);
 const gb=gh=>'<span class="tag '+(gh?'ok':'mute')+'">1H</span>';
 const gateOk=(g,gh)=>g==='all'||!!gh;
@@ -1062,7 +1067,7 @@ function renderPast(){const rows=PAST.filter(r=>r[0].startsWith(pf.day)&&(pf.dir
  const i={t:0,sym:1,mv:6,bars:7,mfe:10,mae:11}[pk];rows.sort((a,b)=>{const x=a[i],y=b[i];
   const v=typeof x==='string'?x.localeCompare(y):(x??-999)-(y??-999);return pa?v:-v});
  PT.innerHTML=rows.map(r=>'<tr><td class="mu">'+(pf.day?'':dshort(r[0])+', ')+t12(r[0])+'</td><td>'+tvA(r[1])+(r[9]?' <span class="tag ok">✓</span>':'')+
-  '</td><td>'+tg(r[2])+'</td><td>'+gb(r[12])+'</td><td class="mu hide-md">'+(r[3]==='SuperTrend'?'SuperTrend':'ADX DI')+'</td><td class="r hide-sm">'+fp(r[4])+
+  '</td><td>'+tg(r[2])+'</td><td>'+gb(r[12])+'</td><td class="mu hide-md">'+SNAME[r[3]]+'</td><td class="r hide-sm">'+fp(r[4])+
   '</td><td class="r hide-md">'+(r[8]?'<span class="fa">open</span>':fp(r[5]))+'</td><td class="r">'+pc(r[6])+'</td><td class="r">'+pc(r[10])+'</td><td class="r hide-sm">'+pc(r[11])+
   '</td><td class="r">'+bt(r[7],r[8])+'</td></tr>').join('')
   ||'<tr><td colspan="11" class="empty">No signals match these filters.</td></tr>';
@@ -1083,29 +1088,32 @@ const med=a=>{if(!a.length)return null;const s=[...a].sort((x,y)=>x-y),m=s.lengt
 function stats(rows){const c=[],o=[],b=[],g=[],d=[];for(const r of rows){const m=mvOf(r);if(m==null)continue;
  if(r[7])o.push(m);else{c.push(m);if(r[6]!=null)b.push(r[6]);if(r[8]!=null){g.push(r[8]);d.push(r[9])}}}
  return{n:rows.length,closed:c.length,open:o.length,win:c.length?c.filter(x=>x>0).length/c.length*100:null,bars:med(b),
-  move:med(c),avg:c.length?c.reduce((x,y)=>x+y,0)/c.length:null,open_move:med(o),mfe:med(g),mae:med(d)}}
+  move:med(c),avg:c.length?c.reduce((x,y)=>x+y,0)/c.length:null,open_move:med(o),mfe:med(g),mae:med(d),
+  all_avg:(c.length+o.length)?c.concat(o).reduce((x,y)=>x+y,0)/(c.length+o.length):null,
+  open_share:(c.length+o.length)?o.length/(c.length+o.length):0}}
 const kpi=(k,v,s)=>'<div class="panel kpi"><div class="k">'+k+'</div><div class="v">'+v+'</div><div class="s">'+s+'</div></div>';
 const big=v=>v==null?'—':Math.abs(v)<0.005?'<span class="mu">0.00%</span>':'<span class="'+(v>0?'up':'dn')+'">'+(v>0?'+':'')+v.toFixed(2)+'%</span>';
 const num=(v,d=0,suf='')=>v==null?'—':v.toFixed(d)+suf;
 function accRow(tag,rows){const a=stats(rows);
+ const warn=a.open_share>0.3?' <span class="tag mute" title="'+Math.round(a.open_share*100)+'% of these signals are still open. Closed-only figures (win rate, median move) are biased towards quick reversals — use Avg incl. open.">⚠ '+Math.round(a.open_share*100)+'% open</span>':'';
  const win=a.win==null?'<span class="fa">—</span>':'<div class="wr"><span style="min-width:38px">'+a.win.toFixed(0)+
   '%</span><span class="tr"><b class="'+(a.win<50?'lo':'')+'" style="width:'+a.win.toFixed(0)+'%"></b></span></div>';
  return '<tr><td>'+tg(tag)+'</td><td class="r">'+a.n+'</td><td class="r hide-sm">'+a.closed+'</td><td>'+win+'</td><td class="r">'+
   num(a.bars)+'</td><td class="r">'+pc(a.move)+'</td><td class="r">'+pc(a.mfe)+'</td><td class="r">'+pc(a.mae)+
-  '</td><td class="r hide-sm">'+pc(a.avg)+'</td><td class="r hide-sm">'+a.open+' · '+pc(a.open_move)+'</td></tr>'}
+  '</td><td class="r hide-sm">'+pc(a.avg)+'</td><td class="r"><b>'+pc(a.all_avg)+'</b></td><td class="r hide-sm">'+a.open+' · '+pc(a.open_move)+warn+'</td></tr>'}
 let accGate='all';
 function funnelRow(label,rows,days){const a=stats(rows);
  const wr=a.win==null?'<span class="fa">—</span>':'<div class="wr"><span style="min-width:38px">'+a.win.toFixed(0)+'%</span><span class="tr"><b class="'+(a.win<50?'lo':'')+'" style="width:'+a.win.toFixed(0)+'%"></b></span></div>';
  return '<tr><td>'+label+'</td><td class="r">'+a.n+'</td><td class="r">'+(days?(a.n/days).toFixed(1):'—')+'</td><td>'+wr+'</td><td class="r">'+pc(a.avg)+
   '</td><td class="r">'+pc(a.move)+'</td><td class="r hide-sm">'+pc(a.mfe)+'</td><td class="r hide-sm">'+pc(a.mae)+'</td></tr>'}
-function renderFunnel(all){const days=new Set(all.map(r=>r[0].slice(0,10))).size,s=all.filter(r=>r[3]<2),c=all.filter(r=>r[3]===2),grp=t=>'<tr class="grp"><td colspan="8">'+t+'</td></tr>';
+function renderFunnel(all){const days=new Set(all.map(r=>r[0].slice(0,10))).size,s=all.filter(r=>isSig(r)),c=all.filter(r=>r[3]===2),grp=t=>'<tr class="grp"><td colspan="8">'+t+'</td></tr>';
  const stage=rows=>[['① 15-min signal',rows],['② + 1-hour trend agrees',rows.filter(r=>r[12])],
   ['<span class="mu">filtered out: 1-hour trend disagrees</span>',rows.filter(r=>!r[12])]];
  $('#acc-funnel').innerHTML=grp('All strategy signals')+stage(s).map(([l,r])=>funnelRow(l,r,days)).join('')+
   grp('Double confirmations')+stage(c).map(([l,r])=>funnelRow(l,r,days)).join('')}
 function renderAcc(sym){const ni=sym?NAMES.indexOf(sym):-1;const scoped=sym?ARCH.filter(r=>r[1]===ni):ARCH;renderFunnel(scoped);
  const rows=scoped.filter(r=>gateOk(accGate,r[12]));
- const sig=rows.filter(r=>r[3]<2),cf=rows.filter(r=>r[3]===2),all=stats(sig),con=stats(cf);
+ const sig=rows.filter(r=>isSig(r)),cf=rows.filter(r=>r[3]===2),all=stats(sig),con=stats(cf);
  const days=[...new Set(sig.map(r=>r[0].slice(0,10)))].sort();
  $('#acc-span').textContent=days.length?dshort(days[0])+' – '+dshort(days[days.length-1])+' · '+days.length+' sessions':'no signals';
  $('#acc-what').textContent=(sym?'Accuracy for '+sym+' only':'All '+NAMES.length+' stocks & indices')+
@@ -1117,16 +1125,20 @@ function renderAcc(sym){const ni=sym?NAMES.indexOf(sym):-1;const scoped=sym?ARCH
  $('#acc-k3').innerHTML=[['Median move at flip','move','where price was when the strategy flipped'],
   ['Median max gain','mfe','furthest in the signal’s favour before the flip'],
   ['Median max drawdown','mae','furthest against the signal before the flip']].map(([t,k,h])=>kpi(t,big(all[k]),h+' · confirmed '+pc(con[k]))).join('');
- const st=sig.filter(r=>r[3]===0),ad=sig.filter(r=>r[3]===1),L=(a,l)=>a.filter(r=>r[2]===l),grp=t=>'<tr class="grp"><td colspan="10">'+t+'</td></tr>';
+ const st=sig.filter(r=>r[3]===0),ad=sig.filter(r=>r[3]===1),ee=sig.filter(r=>r[3]===3),eg=sig.filter(r=>r[3]===4),
+  L=(a,l)=>a.filter(r=>r[2]===l),grp=t=>'<tr class="grp"><td colspan="11">'+t+'</td></tr>';
  $('#acc-body').innerHTML=grp('SuperTrend')+accRow('BUY',L(st,'BUY'))+accRow('SELL',L(st,'SELL'))+accRow('ALL',st)+
   grp('ADX DI')+accRow('BUY',L(ad,'BUY'))+accRow('BUY_STRONG',L(ad,'BUY_STRONG'))+accRow('SELL',L(ad,'SELL'))+
-  accRow('SELL_STRONG',L(ad,'SELL_STRONG'))+accRow('ALL',ad)+grp('Double confirmation (enter on 2nd signal, exit on 1st flip)')+
+  accRow('SELL_STRONG',L(ad,'SELL_STRONG'))+accRow('ALL',ad)+
+  grp('EMA 50×100 — Early Cross (exit on the opposite cross)')+accRow('BUY',L(ee,'BUY'))+accRow('SELL',L(ee,'SELL'))+accRow('ALL',ee)+
+  grp('EMA 50×200 — Golden / Death Cross (exit on the opposite cross)')+accRow('BUY',L(eg,'BUY'))+accRow('SELL',L(eg,'SELL'))+accRow('ALL',eg)+
+  grp('Double confirmation — SuperTrend + ADX DI (enter on 2nd signal, exit on 1st flip)')+
   accRow('CONFIRMED BUY',L(cf,'BUY'))+accRow('CONFIRMED SELL',L(cf,'SELL'));
  accRows=rows;renderSim(rows);renderHours(sig);$('#lb-wrap').style.display=sym?'none':'';if(!sym)renderLeaders(sig);
  const w=$('#acc-log-wrap');w.style.display=sym?'':'none';if(!sym)return;
  const log=[...rows].reverse();$('#acc-log-title').textContent=sym+' — every signal';$('#acc-log-count').textContent=log.length+' signals';
  $('#acc-log').innerHTML=log.map(r=>'<tr><td class="mu">'+dshort(r[0])+', '+t12(r[0])+'</td><td>'+tg(r[3]===2?'CONFIRMED '+r[2]:r[2])+
-  '</td><td class="mu hide-sm">'+(r[3]===0?'SuperTrend':r[3]===1?'ADX DI':'Both')+'</td><td class="r hide-sm">'+fp(r[4])+
+  '</td><td class="mu hide-sm">'+SNAME[SN[r[3]]]+'</td><td class="r hide-sm">'+fp(r[4])+
   '</td><td class="r hide-md">'+(r[7]?'<span class="fa">open</span>':fp(r[5]))+'</td><td class="r">'+pc(mvOf(r))+'</td><td class="r">'+
   pc(r[8])+'</td><td class="r hide-sm">'+pc(r[9])+'</td><td class="r">'+bt(r[6],r[7])+'</td></tr>').join('')||
   '<tr><td colspan="9" class="empty">No signals for this one yet.</td></tr>'}
@@ -1147,10 +1159,11 @@ function simRow(label,rows,ti,si){let res=[],t=0,st=0,f=0;const base=[];
  const d=(avg!=null&&bavg!=null)?avg-bavg:null;
  return '<tr><td>'+label+'</td><td class="r">'+res.length+'</td><td>'+wr+'</td><td class="r">'+pc(avg)+'</td><td class="r">'+pc(med(res))+
   '</td><td class="r hide-sm">'+t+'</td><td class="r hide-sm">'+st+'</td><td class="r hide-sm">'+f+'</td><td class="r">'+(d==null?'—':pc(d)+' <span class="sm">per trade</span>')+'</td></tr>'}
-function renderSim(rows){const ti=+simT.value,si=+simS.value,sig=rows.filter(r=>r[3]<2);
+function renderSim(rows){const ti=+simT.value,si=+simS.value,sig=rows.filter(r=>isSig(r));
  $('#sim-note').textContent=ti<0&&si<0?'No target or stop: every trade exits at the flip (same as the table above).':'';
  $('#sim-body').innerHTML=simRow('All signals',sig,ti,si)+simRow('SuperTrend',sig.filter(r=>r[3]===0),ti,si)+
-  simRow('ADX DI',sig.filter(r=>r[3]===1),ti,si)+simRow('Double confirmation',rows.filter(r=>r[3]===2),ti,si);
+  simRow('ADX DI',sig.filter(r=>r[3]===1),ti,si)+simRow('EMA 50×100',sig.filter(r=>r[3]===3),ti,si)+
+  simRow('EMA 50×200',sig.filter(r=>r[3]===4),ti,si)+simRow('Double confirmation',rows.filter(r=>r[3]===2),ti,si);
  renderEquity(sig,ti,si)}
 function renderEquity(sig,ti,si){const closed=sig.filter(r=>!r[7]).sort((a,b)=>a[0]<b[0]?-1:1);
  const base=[],rule=[];let a=0,b=0;for(const r of closed){const m=mvOf(r);if(m==null)continue;a+=m;base.push(a);
@@ -1303,7 +1316,7 @@ def _tf_tag(v):
 
 
 def _strat_name(strategy):
-    return "SuperTrend" if strategy == "SuperTrend" else "ADX DI"
+    return STRATEGY_NAMES.get(strategy, strategy)
 
 
 def _bars_txt(bars, still_open):
@@ -1579,7 +1592,7 @@ def write_dashboard(state):
     # Accuracy (overall or per stock/index) are drawn from it in the browser.
     # Row: [time, name#, label, strategy (0 ST / 1 ADX / 2 CONFIRMED), price,
     #       exit price, bars, open, max gain, max drawdown]
-    strat_code = {"SuperTrend": 0, "ADX_DI": 1, "CONFIRMED": 2}
+    strat_code = {"SuperTrend": 0, "ADX_DI": 1, "CONFIRMED": 2, "EMA_EARLY": 3, "EMA_GOLDEN": 4}
     names = sorted({h["name"] for h in archive})
     name_ix = {n: i for i, n in enumerate(names)}
     arch_rows = [[h["time"], name_ix[h["name"]], h["label"], strat_code[h["strategy"]], round(h["price"], 2),
@@ -1758,7 +1771,7 @@ stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
 <div class="sh"><h2>Past signals</h2><span class="meta" id="c-past"></span></div>
 <div class="tb"><select class="sel" id="f-past-day" aria-label="Day">{day_opts or '<option value="">No data yet</option>'}</select>
 <div class="seg" id="f-past-dir"><button class="on" data-f="all">All</button><button data-f="buy">Buy</button><button data-f="sell">Sell</button></div>
-<div class="seg" id="f-past-strat"><button class="on" data-f="all">Both</button><button data-f="SuperTrend">SuperTrend</button><button data-f="ADX_DI">ADX DI</button></div>
+<div class="seg" id="f-past-strat"><button class="on" data-f="all">All</button><button data-f="SuperTrend">SuperTrend</button><button data-f="ADX_DI">ADX DI</button><button data-f="EMA_EARLY" title="EMA50 crosses EMA100 (Early Cross)">EMA 50×100</button><button data-f="EMA_GOLDEN" title="EMA50 crosses EMA200 (Golden / Death Cross)">EMA 50×200</button></div>
 <select class="sel" id="f-past-sess" aria-label="Time of day"><option value="">All day</option>
 <option value="09:15-11:00">9:15 – 11 AM</option><option value="11:00-14:00">11 AM – 2 PM</option>
 <option value="14:00-15:30">2 – 3:30 PM</option></select>
@@ -1792,6 +1805,7 @@ candle closed before the signal) points the same way; "1H gate" keeps only those
 <div class="panel tw"><table><thead><tr><th>Signal</th><th class="r">Signals</th><th class="r hide-sm">Closed</th>
 <th>Win rate</th><th class="r">Median bars</th><th class="r">Median move</th><th class="r">Median max gain</th>
 <th class="r">Median max drawdown</th><th class="r hide-sm">Avg move</th>
+<th class="r" title="Closed signals at their exit plus open signals at today's price">Avg incl. open</th>
 <th class="r hide-sm">Open · now</th></tr></thead><tbody id="acc-body"></tbody></table></div>
 <section style="margin-top:26px"><div class="sh"><h2>Exit-rule simulator</h2>
 <span class="meta">what if you exited at a profit target or stop-loss instead of waiting for the flip?</span></div>
@@ -1818,7 +1832,8 @@ candle closed before the signal) points the same way; "1H gate" keeps only those
 <p class="note below">A signal <b>wins</b> if price moved in its favour (up after a buy, down after a sell) by the bar where that
 strategy flipped. <b>Median bars</b> = 15-min bars until the flip; <b>Median move</b> = typical % move in the signal's favour at
 the flip; <b>Max gain</b> / <b>Max drawdown</b> = the furthest price went in the signal's favour / against it
-(candle highs and lows) before the flip. Open signals aren't scored — their current move is shown separately. Builds up to {ARCHIVE_KEEP_DAYS} days of history.
+(candle highs and lows) before the flip. Open signals aren't in the win rate or median move — <b>Avg incl. open</b> adds them at today's price, and ⚠ flags rows
+where many signals are still open (slow strategies such as the EMA crosses), where closed-only figures understate them. Builds up to {ARCHIVE_KEEP_DAYS} days of history.
 <b>Simulator</b>: a trade exits at the target or stop, whichever price reaches first (if both are touched in the same 15-min candle
 it assumes the stop — the cautious choice); otherwise at the flip. Open signals that haven't hit either level aren't counted.
 Ignores brokerage, taxes and slippage.</p>
@@ -1895,7 +1910,8 @@ INDEX_STATE_PREFIX = "__INDEX__"  # state keys for indices, kept apart from stoc
 
 
 def evaluate(name, df, prev, htf=None):
-    """Run both strategies on one bar series. Returns (new_state, fired) where
+    """Run the strategies (SuperTrend, ADX DI, EMA 50×100 and EMA 50×200
+    crosses) on one bar series. Returns (new_state, fired) where
     fired lists the signals that changed since `prev` (last cycle's state).
     `htf` (from htf_trends) adds the 1-hour trend gate."""
     h = df["high"].to_numpy(dtype=np.float64)
@@ -1916,9 +1932,20 @@ def evaluate(name, df, prev, htf=None):
     condition = _build_condition(di_plus, di_minus, sig, HL_RANGE, HL_TREND, is_open)
     adx_cond = float(condition[-1])
 
+    # EMA 50 / 100 / 200 on the same 15-min candles — the TradingView indicator's
+    # Early Cross (EMA50 × EMA100) and Golden / Death Cross (EMA50 × EMA200)
+    cs = pd.Series(c)
+    e50, e100, e200 = (cs.ewm(span=n, adjust=False).mean().to_numpy() for n in (50, 100, 200))
+    ema_early = np.sign(e50 - e100).astype(np.int8)
+    ema_golden = np.sign(e50 - e200).astype(np.int8)
+
     fired = []
     prev_st = prev.get("st_trend")
     prev_adx = prev.get("adx_cond")
+    for key, side, strat in (("ema_early", ema_early, "EMA_EARLY"), ("ema_golden", ema_golden, "EMA_GOLDEN")):
+        was = prev.get(key)
+        if was in (1, -1) and side[-1] in (1, -1) and side[-1] != was:
+            fired.append((strat, name, "BUY" if side[-1] == 1 else "SELL", last_close, last_ts))
     if prev_st is not None and prev_st == -1 and st_trend == 1:
         fired.append(("SuperTrend", name, "BUY", last_close, last_ts))
     if prev_st is not None and prev_st == 1 and st_trend == -1:
@@ -1937,10 +1964,11 @@ def evaluate(name, df, prev, htf=None):
                    if len(prev_session) and prev_session[-1] else None)
 
     new_state = {"st_trend": st_trend, "adx_cond": adx_cond, "last_ts": last_ts,
+                 "ema_early": int(ema_early[-1]), "ema_golden": int(ema_golden[-1]),
                  "last_close": last_close, "distance_pct": distance_pct,
                  "day_chg_pct": day_chg_pct, "name": name,
                  "tf1h": htf_at(htf, "1h", df.index[-1] + pd.Timedelta(minutes=15)),
-                 "history": bar_signals(name, df, c, trend, condition, htf),
+                 "history": bar_signals(name, df, c, trend, condition, htf, ema_early, ema_golden),
                  "history_from": str(df.index[np.isin(dates, sorted(set(dates))[-REPLAY_DAYS:])][0])}
     return new_state, fired
 
@@ -1952,14 +1980,15 @@ ARCHIVE_KEY = "__ARCHIVE__"
 ARCHIVE_KEEP_DAYS = 30   # calendar days of replayed signals kept for the accuracy tracker
 
 
-def bar_signals(name, df, close, trend, condition, htf=None):
+def bar_signals(name, df, close, trend, condition, htf=None, ema_early=None, ema_golden=None):
     """Every signal the strategies gave, bar by bar, over the last REPLAY_DAYS
     trading days in `df` — the same state changes the live scan alerts on, but
     replayed on completed bars. "time" is the 15-min candle the signal formed
     on, labelled by its start like TradingView (the 3:15 PM candle closes the
     session at 3:30); "price" is that candle's close.
     "bars" is how many 15-min bars the signal lasted before that strategy
-    turned (SuperTrend flipped back / ADX left that side); "open" means it
+    turned (SuperTrend flipped back / ADX left that side / the EMA pair crossed
+    back the other way); "open" means it
     hasn't turned yet and "bars" counts the bars so far. "exit_price" /
     "exit_time" are the close and candle time of the bar where it turned.
     "mfe" / "mae" are the maximum move in the signal's favour / against it
@@ -2039,8 +2068,12 @@ def bar_signals(name, df, close, trend, condition, htf=None):
             labels.append(("ADX_DI", "BUY_STRONG" if cur == 1.0 else "BUY"))
         elif cur in (-1.0, -0.5) and prv not in (-1.0, -0.5):
             labels.append(("ADX_DI", "SELL_STRONG" if cur == -1.0 else "SELL"))
+        for strat, side in (("EMA_EARLY", ema_early), ("EMA_GOLDEN", ema_golden)):
+            if side is not None and side[i] in (1, -1) and side[i - 1] in (1, -1) and side[i] != side[i - 1]:
+                labels.append((strat, "BUY" if side[i] == 1 else "SELL"))
+        sides = {"SuperTrend": st_side, "ADX_DI": adx_side, "EMA_EARLY": ema_early, "EMA_GOLDEN": ema_golden}
         for strat, label in labels:
-            end, still_open = flip_index(st_side if strat == "SuperTrend" else adx_side, i)
+            end, still_open = flip_index(sides[strat], i)
             out.append(entry(i, end, still_open, strat, label))
 
     latest = {}
