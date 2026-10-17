@@ -36,7 +36,7 @@ Notes:
     session, Mon-Fri. It sleeps outside those hours and wakes near open.
   - State is kept in signal_state.json next to this script, so restarting
     the script does not re-fire already-seen signals.
-  - Universe = Nifty 100 + Nifty Midcap 50, fetched from NSE's official
+  - Universe = Nifty 500, fetched from NSE's official
     constituent CSVs at the start of every scan, so index reshuffles (about
     every 6 months) are picked up automatically. If NSE can't be reached,
     the built-in NIFTY150 list below (snapshot as of 2026-10-07) is used;
@@ -79,6 +79,8 @@ Rate-limit avoidance (yfinance / Yahoo chart API is aggressive about 429s):
 """
 import warnings; warnings.filterwarnings("ignore")
 
+import base64
+import gzip
 import html as html_lib
 import json
 import os
@@ -194,11 +196,11 @@ NIFTY150 = sorted(set([
 
 # The universe is refreshed from NSE's published constituent CSVs (with
 # NIFTY150 above as the fallback), so index reshuffles are picked up without
-# editing this file. Nifty 100 and Midcap 50 don't overlap -> 150 names.
+# editing this file. The universe is the Nifty 500.
 NSE_INDEX_URLS = {
-    "Nifty100": ("https://nsearchives.nseindia.com/content/indices/ind_nifty100list.csv", 100),
-    "Midcap50": ("https://nsearchives.nseindia.com/content/indices/ind_niftymidcap50list.csv", 50),
+    "Nifty500": ("https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv", 500),
 }
+UNIVERSE_FALLBACK = Path(__file__).parent / "nifty500_list.csv"   # saved copy of the NSE list
 
 # The indices themselves, scanned with the same strategies after the stocks.
 INDEX_TICKERS = {
@@ -215,10 +217,11 @@ SECTORS = {}  # symbol -> NSE industry, filled by load_universe()
 
 
 def load_universe():
-    """Live Nifty 100 + Midcap 50 constituents from NSE, else the NIFTY150
-    snapshot. Each CSV must parse to roughly its expected size, so an error
-    page or a half-loaded file can't silently shrink the universe. Also fills
-    SECTORS from the CSVs' Industry column."""
+    """Live Nifty 500 constituents from NSE, else the saved copy
+    (nifty500_list.csv), else the old NIFTY150 snapshot. The CSV must parse to
+    roughly its expected size, so an error page or a half-loaded file can't
+    silently shrink the universe. Also fills SECTORS from the Industry column.
+    NSE placeholder rows (symbols starting "DUMMY") are skipped."""
     from io import StringIO
     try:
         symbols = set()
@@ -229,18 +232,21 @@ def load_universe():
                 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
                 text = urllib.request.urlopen(req, timeout=15).read().decode()
             table = pd.read_csv(StringIO(text))
+            table = table[~table["Symbol"].str.strip().str.startswith("DUMMY")]
             got = set(table["Symbol"].str.strip())
             if "Industry" in table:
                 SECTORS.update(zip(table["Symbol"].str.strip(), table["Industry"].astype(str).str.strip()))
             if abs(len(got) - expected) > 5:
                 raise ValueError(f"{name} list has {len(got)} symbols, expected ~{expected}")
             symbols |= got
-        added, dropped = symbols - set(NIFTY150), set(NIFTY150) - symbols
-        if added or dropped:
-            print(f"[info] NSE constituents changed vs. built-in list — "
-                  f"added {sorted(added)}, dropped {sorted(dropped)}")
         return sorted(symbols)
     except Exception as e:
+        if UNIVERSE_FALLBACK.exists():
+            table = pd.read_csv(UNIVERSE_FALLBACK)
+            table = table[~table["Symbol"].str.strip().str.startswith("DUMMY")]
+            SECTORS.update(zip(table["Symbol"].str.strip(), table["Industry"].astype(str).str.strip()))
+            print(f"[warn] live NSE constituent fetch failed ({e}); using the saved Nifty 500 list")
+            return sorted(table["Symbol"].str.strip())
         print(f"[warn] live NSE constituent fetch failed ({e}); using built-in list")
         return NIFTY150
 
@@ -507,7 +513,7 @@ def daily_ema_trend(symbol, yf_ticker, df15):
 MOM_KEY = "__MOMENTUM__"
 MOM_TOP, MOM_LOOKBACK, MOM_SKIP = 15, 12, 1
 MOM_COST = 0.281   # % per delivery round trip (as momentum_backtest.py), charged on turnover
-MOM_BENCH = {"NIFTY 200": "^CNX200", "Momentum ETF": "MOMENTUM.NS"}
+MOM_BENCH = {"NIFTY 500": "^CRSLDX", "Momentum ETF": "MOMENTUM50.NS"}  # Nifty500 Momentum 50 ETF
 
 
 def _daily_frame(df):
@@ -602,6 +608,11 @@ def update_momentum(state, universe):
     cur = months.get(month)
     if not cur:
         return
+    for name in MOM_BENCH:           # benchmarks added later get this month's entry too
+        if name not in cur.setdefault("bench_entry", {}):
+            fo = _first_open(bench_daily.get(name), month)
+            if fo:
+                cur["bench_entry"][name] = fo[1]
     # ── live view
     rows = []
     for rank, sym in enumerate(sorted(cur["holdings"], key=lambda x: -cur["scores"][x]), 1):
@@ -1400,9 +1411,9 @@ def _momentum_view_html(state, sectors):
     since = v.get("since") or v["month"]
     kpis = (
         f'<div class="panel kpi"><div class="k">This month ({e(mon(v["month"]))})</div><div class="v">{pct(v["mtd"])}</div>'
-        f'<div class="s">NIFTY 200 {pct(bm.get("NIFTY 200"))} · momentum ETF {pct(bm.get("Momentum ETF"))}</div></div>'
+        f'<div class="s">NIFTY 500 {pct(bm.get("NIFTY 500"))} · momentum ETF {pct(bm.get("Momentum ETF"))}</div></div>'
         f'<div class="panel kpi"><div class="k">Paper return since {e(mon(since))}</div><div class="v">{pct(cum.get("portfolio"))}</div>'
-        f'<div class="s">NIFTY 200 {pct(cum.get("NIFTY 200"))} · ETF {pct(cum.get("Momentum ETF"))}</div></div>'
+        f'<div class="s">NIFTY 500 {pct(cum.get("NIFTY 500"))} · ETF {pct(cum.get("Momentum ETF"))}</div></div>'
         f'<div class="panel kpi"><div class="k">Equal weight, all stocks</div><div class="v">{pct(v.get("ew_mtd"))}</div>'
         f'<div class="s">this month · since {e(mon(since))} {pct(cum.get("ew"))}</div></div>'
         f'<div class="panel kpi"><div class="k">Next rebalance ({e(mon(v["next_month"]))})</div>'
@@ -1425,7 +1436,7 @@ def _momentum_view_html(state, sectors):
         for k, (sym, sc) in enumerate(v["ranking"][:30], 1))
     hist = "".join(
         f'<tr><td>{e(mon(h["month"]))}</td><td class="r">{pct(h["net"])}</td>'
-        f'<td class="r">{pct(h["bench"].get("NIFTY 200"))}</td><td class="r">{pct(h["bench"].get("Momentum ETF"))}</td>'
+        f'<td class="r">{pct(h["bench"].get("NIFTY 500", h["bench"].get("NIFTY 200")))}</td><td class="r">{pct(h["bench"].get("Momentum ETF"))}</td>'
         f'<td class="r">{pct(h.get("ew"))}</td><td class="r">{h["turnover"] * 100:.0f}%</td></tr>' for h in reversed(v["history"]))
     chips = lambda xs, kind: " ".join(f'<span class="tag {kind}">{e(x)}</span>' for x in xs) or '<span class="fa">none</span>'  # noqa: E731
 
@@ -1442,13 +1453,14 @@ def _momentum_view_html(state, sectors):
 <b>Going out:</b> {chips(v["next_out"], "dn")}</div>
 <div style="margin-top:12px">{tbl('<th class="r">#</th><th>Stock</th><th class="hide-md">Sector</th><th class="r">12-1 momentum</th><th>Daily trend</th>', ranking, "")}</div></section>
 <section><div class="sh"><h2>Month by month</h2><span class="meta">paper results after costs</span></div>
-{tbl('<th>Month</th><th class="r">Portfolio</th><th class="r">NIFTY 200</th><th class="r">Momentum ETF</th><th class="r">Equal weight</th><th class="r">Turnover</th>', hist, "First month in progress — results appear here as each month closes.")}</section></div>
+{tbl('<th>Month</th><th class="r">Portfolio</th><th class="r">NIFTY 500</th><th class="r">Momentum ETF</th><th class="r">Equal weight</th><th class="r">Turnover</th>', hist, "First month in progress — results appear here as each month closes.")}</section></div>
 <p class="note below"><b>Rules</b> (same as momentum_backtest.py): at each month-end, rank the stocks by their return over the past
 12 months skipping the latest month; hold the top {MOM_TOP} in equal weight from the next month's first open; charge delivery costs
-(~{MOM_COST:.2f}% per round trip) on every stock swapped. Benchmarks: NIFTY 200, a listed Nifty200 Momentum 30 ETF (NSE's real
-momentum index, after fund costs) and an equal-weight portfolio of all the stocks. <b>Read with care:</b> the historical backtest
-(momentum_report.md) is inflated by survivorship bias — over Aug 2022 – Sep 2026 the real momentum ETF beat the Nifty 200 by about
-2.7 points a year, against ~19 in the backtest. This tab is a forward paper record from {e(mon(since))}, so it carries no such bias.
+(~{MOM_COST:.2f}% per round trip) on every stock swapped. Universe: the Nifty 500 (October 2026 was formed from the earlier
+150-stock list). Benchmarks: NIFTY 500, a listed Nifty500 Momentum 50 ETF (NSE's real momentum index, after fund costs) and an
+equal-weight portfolio of all the stocks. <b>Read with care:</b> the historical backtests (momentum_report.md,
+momentum_report_n500.md) are inflated by survivorship bias — over Aug 2022 – Sep 2026 a real Nifty200 Momentum 30 ETF beat the
+Nifty 200 by about 2.7 points a year, against ~19–23 in the backtests. This tab is a forward paper record from {e(mon(since))}, so it carries no such bias.
 Paper tracking only — not a recommendation; speak to a SEBI-registered adviser before investing.</p>"""
 
 
@@ -1576,7 +1588,12 @@ def write_dashboard(state):
                   h.get("hf") or [], h.get("ha") or [], int(bool(h.get("gh")))]
                  for h in sorted(archive, key=lambda x: x["time"])]
     prices = {name_ix[n]: _current_price(state, n) for n in names}
-    data_js = ("const NAMES=" + json.dumps(names) + ";const ARCH=" + json.dumps(arch_rows, separators=(",", ":"))
+    # The archive and the 500-row stock table are the bulk of the page; both go in
+    # gzip-compressed (base64) and are unpacked in the browser (DecompressionStream).
+    def gz(text):
+        return base64.b64encode(gzip.compress(text.encode("utf-8"), 9)).decode("ascii")
+
+    data_js = ("const NAMES=" + json.dumps(names) + ";const ARCH_GZ=\"" + gz(json.dumps(arch_rows, separators=(",", ":"))) + "\""
                + ";const PX=" + json.dumps(prices, separators=(",", ":"))
                + ";const PDAYS=new Set(" + json.dumps(past_days) + ");const SIM_LEVELS="
                + json.dumps(list(SIM_LEVELS)) + ";const TVI=" + json.dumps(TV_INDEX)
@@ -1825,7 +1842,7 @@ Ignores brokerage, taxes and slippage.</p>
 <button data-f="short">ST short</button><button data-f="abuy">ADX buy</button><button data-f="asell">ADX sell</button>
 <button data-f="stale" title="Latest candle older than the rest">Stale</button></div></div>
 {table("t-stocks", '<th data-k="sym" data-asc="1">Stock</th><th class="hide-md" data-k="sector" data-asc="1">Sector</th><th class="r" data-k="px" data-asc="0">Price</th><th class="r" data-k="chg" data-asc="0">Day</th><th data-k="st" data-asc="0">SuperTrend</th><th data-k="tf1h" data-asc="0" title="1-hour SuperTrend">1H</th><th data-k="adx" data-asc="0">ADX DI</th><th data-k="gck" data-asc="0" title="Daily EMA50 vs EMA200 — golden / death cross, sessions since">Daily trend</th><th class="r sorted" data-k="dist" data-asc="1">To flip</th><th data-k="mv" data-asc="0">Last signal</th>',
-       "".join(stock_rows), "No stocks match.", "dist")}
+       "", "No stocks match.", "dist")}
 </div>
 
 <div class="foot">All times IST. Data: Yahoo Finance (~15 min delayed); this page refreshes every 5 minutes.
@@ -1834,7 +1851,17 @@ trend read, not a trade signal: in backtests (ema_cross_report.md) trading the c
 SELL signals, the stage gates and the accuracy figures are not from the original backtests. Not investment advice.</div>
 </main>
 <script>{data_js}</script>
-<script>const NEAR={WATCHLIST_PCT};{DASHBOARD_JS}</script></body></html>"""
+<script>const STOCKS_GZ="{gz("".join(stock_rows))}";</script>
+<script>const NEAR={WATCHLIST_PCT};
+(async()=>{{
+const gunzip=async b64=>{{const bin=Uint8Array.from(atob(b64),c=>c.charCodeAt(0));
+ return await new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream('gzip'))).text()}};
+let ARCH=[];
+try{{ARCH=JSON.parse(await gunzip(ARCH_GZ));
+ document.querySelector('#t-stocks tbody').insertAdjacentHTML('afterbegin',await gunzip(STOCKS_GZ));}}
+catch(err){{document.querySelector('main').insertAdjacentHTML('afterbegin','<div class="panel empty">This browser could not unpack the dashboard data — please update it.</div>');}}
+{DASHBOARD_JS}
+}})();</script></body></html>"""
     DASHBOARD_FILE.write_text(page, encoding="utf-8")
 
 
@@ -1859,7 +1886,7 @@ def seconds_until_next_check():
 # ─── Scan ───────────────────────────────────────────────────────────────────
 
 PACE_FRACTION = 0.85  # fraction of the poll window spent spreading requests
-ONCE_PACE_SECONDS = 1.0  # --once mode: CI minutes are billed, so scan faster
+ONCE_PACE_SECONDS = 0.3  # --once mode: 500 stocks must fit a 15-min cycle
 ONCE_LATEST_RUN = (16, 15)  # --once: allow late/delayed runs to catch the final bar
 MIN_SCAN_GAP = 8 * 60       # --once: a run this soon after the last scan is a duplicate trigger
 
@@ -2236,6 +2263,29 @@ if __name__ == "__main__":
                 write_dashboard(load_state())
             sys.exit(0)
         scan_once(float(os.environ.get("SCAN_PACE_SECONDS", ONCE_PACE_SECONDS)))
+        sys.exit(0)
+    if "--warm" in sys.argv:
+        # Pre-market (scheduled ~8:30 AM IST): the slow once-a-day downloads —
+        # 15 days of 15-min bars, 60 days hourly, 5 years daily — for every
+        # symbol, so market-hours scans only fetch today's bars. No signals,
+        # no alerts, no dashboard; just fills the bar cache.
+        uni = load_universe()
+        names = [(s, f"{s}.NS") for s in uni] + list(INDEX_TICKERS.items()) + list(MOM_BENCH.items())
+        t0 = time.time()
+        for k, (name, yt) in enumerate(names, 1):
+            try:
+                df = fetch_15m(name, yt)
+                if df is not None:
+                    htf_trends(name, yt, df)
+                daily_history(name, yt)
+            except Exception as e:  # noqa: BLE001
+                print(f"[warn] warm {name}: {e}")
+            if k % 50 == 0:
+                print(f"[warm] {k}/{len(names)} ({time.time() - t0:.0f}s)")
+                save_bars_cache()
+            time.sleep(float(os.environ.get("SCAN_PACE_SECONDS", ONCE_PACE_SECONDS)))
+        save_bars_cache()
+        print(f"[warm] cached {len(names)} symbols in {time.time() - t0:.0f}s")
         sys.exit(0)
     if "--test" in sys.argv:
         print("[--test] Ignoring market-hours gate, running one scan against latest available bars.")

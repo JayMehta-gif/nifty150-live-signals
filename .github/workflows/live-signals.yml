@@ -7,6 +7,7 @@ on:
     # since Yahoo data lags ~15 min. GitHub may start runs late or skip them, so
     # an external timer (cron-job.org) also triggers workflow_dispatch on time;
     # whichever arrives second within 8 minutes is skipped as a duplicate.
+    - cron: "0 3 * * 1-5"    # 8:30 AM IST pre-market warm-up: daily downloads for 500 stocks
     - cron: "45 3 * * 1-5"
     - cron: "0,15,30,45 4-9 * * 1-5"
     - cron: "0,15,30 10 * * 1-5"
@@ -28,7 +29,7 @@ concurrency:
 jobs:
   scan:
     runs-on: ubuntu-24.04  # pinned: ubuntu-latest moves to 26.04 from 19 Oct 2026
-    timeout-minutes: 15
+    timeout-minutes: 40   # 500 stocks; the pre-market warm-up is the long one
     outputs:
       dashboard: ${{ steps.site.outputs.ready }}
     steps:
@@ -64,7 +65,7 @@ jobs:
           TELEGRAM_UNTIL: ${{ vars.TELEGRAM_UNTIL }}
           # TELEGRAM_SYMBOLS = NIFTY 50 (default) | comma-separated names | all
           TELEGRAM_SYMBOLS: ${{ vars.TELEGRAM_SYMBOLS }}
-        run: python -u nifty150_live_signals.py ${{ inputs.test_telegram && '--test-telegram' || (inputs.full_scan && '--test' || '--once') }}
+        run: python -u nifty150_live_signals.py ${{ github.event.schedule == '0 3 * * 1-5' && '--warm' || (inputs.test_telegram && '--test-telegram' || (inputs.full_scan && '--test' || '--once')) }}
 
       # The scan (or, outside market hours, the last saved state) writes
       # dashboard.html. It is published to GitHub Pages only in encrypted form
