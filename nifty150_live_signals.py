@@ -460,12 +460,8 @@ DAILY_HISTORY = "5y"  # daily candles behind the golden-cross trend (long, so EM
 FRESH_CROSS_DAYS = 10
 
 
-def daily_ema_trend(symbol, yf_ticker, df15):
-    """Daily EMA 50 / 100 / 200 trend, as on the TradingView "EMA 50, 100 and
-    200" indicator: gc = +1 golden (EMA50 above EMA200) / -1 death, with the date
-    of the last cross and sessions since; ec = early-cross state (EMA50 vs EMA100);
-    ema200_dist = % price is above/below EMA200. Two years of daily candles are
-    downloaded once a day (cached); today's close is the latest 15-min close."""
+def daily_history(symbol, yf_ticker):
+    """Daily candles (DAILY_HISTORY), downloaded once a day and cached."""
     cache = load_bars_cache()
     key = f"{yf_ticker}|1d"
     today = datetime.now(IST).date()
@@ -476,6 +472,16 @@ def daily_ema_trend(symbol, yf_ticker, df15):
             hist = got.copy()
             hist.attrs["full_fetch"] = str(today)
             cache[key] = hist
+    return hist
+
+
+def daily_ema_trend(symbol, yf_ticker, df15):
+    """Daily EMA 50 / 100 / 200 trend, as on the TradingView "EMA 50, 100 and
+    200" indicator: gc = +1 golden (EMA50 above EMA200) / -1 death, with the date
+    of the last cross and sessions since; ec = early-cross state (EMA50 vs EMA100);
+    ema200_dist = % price is above/below EMA200. Five years of daily candles are
+    downloaded once a day (cached); today's close is the latest 15-min close."""
+    hist = daily_history(symbol, yf_ticker)
     if hist is None or df15 is None or df15.empty:
         return {}
     last_day = df15.index[-1].date()
@@ -496,6 +502,139 @@ def daily_ema_trend(symbol, yf_ticker, df15):
     ec, ec_date, ec_days = last_cross(e50, e100)
     return {"gc": gc, "gc_date": gc_date, "gc_days": gc_days, "ec": ec, "ec_date": ec_date,
             "ec_days": ec_days, "ema200_dist": round(float((c.iloc[-1] / e200[-1] - 1) * 100), 2)}
+
+
+MOM_KEY = "__MOMENTUM__"
+MOM_TOP, MOM_LOOKBACK, MOM_SKIP = 15, 12, 1
+MOM_COST = 0.281   # % per delivery round trip (as momentum_backtest.py), charged on turnover
+MOM_BENCH = {"NIFTY 200": "^CNX200", "Momentum ETF": "MOMENTUM.NS"}
+
+
+def _daily_frame(df):
+    d = df.copy()
+    d.index = d.index.tz_localize(None).normalize()
+    return d[~d.index.duplicated(keep="last")]
+
+
+def momentum_scores(daily, month):
+    """12-1 momentum for the portfolio held in `month` (YYYY-MM): return from the
+    close of month-14 to the close of month-2 — ranked at month-1's last close,
+    skipping the most recent month. Same rule as momentum_backtest.py."""
+    p = pd.Period(month, "M")
+    end_p, start_p = p - 1 - MOM_SKIP, p - 1 - MOM_SKIP - MOM_LOOKBACK
+    out = {}
+    for sym, d in daily.items():
+        me = d["close"].groupby(d.index.to_period("M")).last()
+        if end_p in me.index and start_p in me.index and me[start_p] > 0:
+            out[sym] = float(me[end_p] / me[start_p] - 1)
+    return out
+
+
+def _first_open(d, month):
+    """(date, open) of the first session in `month`, or None."""
+    if d is None or d.empty:
+        return None
+    rows = d[d.index.to_period("M") == pd.Period(month, "M")]
+    return (str(rows.index[0].date()), float(rows["open"].iloc[0])) if len(rows) else None
+
+
+def update_momentum(state, universe):
+    """Paper-track the monthly momentum portfolio (top MOM_TOP by 12-1 momentum,
+    equal weight, bought at the month's first open). On the first scan of a new
+    month the previous month is closed at this month's first open, costs are
+    charged on turnover, and the new portfolio is formed. Benchmarks over the same
+    months: NIFTY 200, a listed Nifty200 Momentum 30 ETF, and an equal-weight
+    portfolio of the whole universe. Stores a ready-to-render view in state."""
+    cache = load_bars_cache()
+    daily = {s: _daily_frame(cache[f"{s}.NS|1d"]) for s in universe if cache.get(f"{s}.NS|1d") is not None}
+    if len(daily) < MOM_TOP * 3:
+        return
+    bench_daily, bench_now = {}, {}
+    for name, ticker in MOM_BENCH.items():
+        h = daily_history(name, ticker)
+        if h is not None:
+            bench_daily[name] = _daily_frame(h)
+        try:
+            b15 = fetch_15m(name, ticker)
+            if b15 is not None and len(b15):
+                bench_now[name] = float(b15["close"].iloc[-1])
+        except Exception as e:  # noqa: BLE001
+            print(f"[warn] momentum benchmark {name}: {e}")
+    rec = state.setdefault(MOM_KEY, {"months": {}})
+    months = rec["months"]
+    month = f"{datetime.now(IST):%Y-%m}"
+
+    def price_now(sym):
+        info = state.get(sym) or {}
+        if info.get("last_close"):
+            return float(info["last_close"])
+        return float(daily[sym]["close"].iloc[-1]) if sym in daily else None
+
+    if month not in months:
+        entries = {s: fo for s, d in daily.items() if (fo := _first_open(d, month))}
+        scores = {k: v for k, v in momentum_scores(daily, month).items() if k in entries}
+        if len(scores) >= MOM_TOP * 2:
+            top = sorted(scores, key=scores.get, reverse=True)[:MOM_TOP]
+            prev_key = max(months) if months else None
+            if prev_key and not months[prev_key].get("closed"):
+                pm = months[prev_key]
+                gross = float(np.mean([(entries[s][1] if s in entries else (price_now(s) or pm["entry"][s]))
+                                       / pm["entry"][s] - 1 for s in pm["holdings"]]))
+                ew = [entries[s][1] / px - 1 for s, px in pm["ew_entry"].items() if s in entries and px]
+                bench = {}
+                for name, px in pm.get("bench_entry", {}).items():
+                    fo = _first_open(bench_daily.get(name), month)
+                    if px and fo:
+                        bench[name] = fo[1] / px - 1
+                pm.update(closed=True, exit_date=next(iter(entries.values()))[0],
+                          gross=gross, net=gross - pm["cost"], ew=float(np.mean(ew)) if ew else None, bench=bench)
+            prev_hold = set(months[prev_key]["holdings"]) if prev_key else set()
+            turnover = len(set(top) - prev_hold) / MOM_TOP if prev_hold else 1.0
+            months[month] = {
+                "start": next(iter(entries.values()))[0], "holdings": top,
+                "entry": {s: entries[s][1] for s in top}, "scores": {s: scores[s] for s in top},
+                "turnover": turnover, "cost": (turnover if prev_hold else 0.5) * MOM_COST / 100,
+                "ew_entry": {s: v[1] for s, v in entries.items()},
+                "bench_entry": {n: fo[1] for n in MOM_BENCH if (fo := _first_open(bench_daily.get(n), month))},
+                "closed": False}
+            if not rec.get("since"):
+                rec["since"] = month
+    cur = months.get(month)
+    if not cur:
+        return
+    # ── live view
+    rows = []
+    for rank, sym in enumerate(sorted(cur["holdings"], key=lambda x: -cur["scores"][x]), 1):
+        now = price_now(sym)
+        rows.append({"sym": sym, "rank": rank, "score": cur["scores"][sym], "entry": cur["entry"][sym],
+                     "now": now, "mtd": (now / cur["entry"][sym] - 1) if now else None})
+    mtd = float(np.mean([r["mtd"] for r in rows if r["mtd"] is not None])) - cur["cost"]
+    ew_now = [price_now(s) / px - 1 for s, px in cur["ew_entry"].items() if px and price_now(s)]
+    bench_mtd = {n: bench_now[n] / px - 1 for n, px in cur.get("bench_entry", {}).items() if n in bench_now and px}
+    nxt = (pd.Period(month, "M") + 1).strftime("%Y-%m")
+    nscores = momentum_scores(daily, nxt)
+    ranking = sorted(nscores, key=nscores.get, reverse=True)
+    closed = [m for m in sorted(months) if months[m].get("closed")]
+
+    def cum(key):
+        vals = [months[m]["net"] if key == "net" else (months[m]["ew"] if key == "ew" else months[m]["bench"].get(key))
+                for m in closed]
+        live = {"net": mtd, "ew": float(np.mean(ew_now)) if ew_now else None}.get(key, bench_mtd.get(key))
+        vals = [v for v in vals + [live] if v is not None]
+        return float(np.prod([1 + v for v in vals]) - 1) if vals else None
+
+    rec["view"] = {
+        "month": month, "start": cur["start"], "since": rec.get("since"), "rows": rows, "mtd": mtd,
+        "ew_mtd": float(np.mean(ew_now)) if ew_now else None, "bench_mtd": bench_mtd,
+        "turnover": cur["turnover"], "next_month": nxt, "next_top": ranking[:MOM_TOP],
+        "next_in": [s for s in ranking[:MOM_TOP] if s not in cur["holdings"]],
+        "next_out": [s for s in cur["holdings"] if s not in ranking[:MOM_TOP]],
+        "ranking": [(s, nscores[s]) for s in ranking[:60]],
+        "history": [{"month": m, "net": months[m]["net"], "ew": months[m].get("ew"), "bench": months[m].get("bench", {}),
+                     "turnover": months[m]["turnover"]} for m in closed],
+        "cum": {"portfolio": cum("net"), "ew": cum("ew"), **{n: cum(n) for n in MOM_BENCH}},
+        "prev_holdings": months[closed[-1]]["holdings"] if closed else [],
+    }
 
 
 def htf_at(htf, frame, ts):
@@ -1240,6 +1379,72 @@ def accuracy_stats(signals, state):
 
 # ── page ───────────────────────────────────────────────────────────────────
 
+def _momentum_view_html(state, sectors):
+    """Momentum tab: paper-tracked monthly top-15 portfolio, benchmarks, next
+    month's list, ranking and month-by-month history."""
+    e = html_lib.escape
+    v = (state.get(MOM_KEY) or {}).get("view")
+    if not v:
+        return '<div class="panel empty">The momentum portfolio forms on the first scan with 13+ months of daily data.</div>'
+    mon = lambda m: pd.Period(m, "M").strftime("%b %Y")  # noqa: E731
+    pct = lambda x: _pct(x * 100) if x is not None else '<span class="fa">—</span>'  # noqa: E731
+    bm = v.get("bench_mtd", {})
+    cum = v.get("cum", {})
+    since = v.get("since") or v["month"]
+    kpis = (
+        f'<div class="panel kpi"><div class="k">This month ({e(mon(v["month"]))})</div><div class="v">{pct(v["mtd"])}</div>'
+        f'<div class="s">NIFTY 200 {pct(bm.get("NIFTY 200"))} · momentum ETF {pct(bm.get("Momentum ETF"))}</div></div>'
+        f'<div class="panel kpi"><div class="k">Paper return since {e(mon(since))}</div><div class="v">{pct(cum.get("portfolio"))}</div>'
+        f'<div class="s">NIFTY 200 {pct(cum.get("NIFTY 200"))} · ETF {pct(cum.get("Momentum ETF"))}</div></div>'
+        f'<div class="panel kpi"><div class="k">Equal weight, all stocks</div><div class="v">{pct(v.get("ew_mtd"))}</div>'
+        f'<div class="s">this month · since {e(mon(since))} {pct(cum.get("ew"))}</div></div>'
+        f'<div class="panel kpi"><div class="k">Next rebalance ({e(mon(v["next_month"]))})</div>'
+        f'<div class="v">{len(v["next_in"])} in · {len(v["next_out"])} out</div>'
+        f'<div class="s">at the first session’s open · already determined by data</div></div>')
+    leaving = set(v["next_out"])
+    hold = "".join(
+        f'<tr data-sym="{e(r["sym"])}" data-mtd="{r["mtd"] if r["mtd"] is not None else -9}" data-score="{r["score"]}">'
+        f'<td class="r mu">{r["rank"]}</td><td>{_tv(r["sym"])}</td><td class="mu hide-md">{e(sectors.get(r["sym"], "—"))}</td>'
+        f'<td class="r">{_pct(r["score"] * 100)}</td><td class="r">{_fmt_price(r["entry"])}</td>'
+        f'<td class="r">{_fmt_price(r["now"])}</td><td class="r">{pct(r["mtd"])}</td>'
+        f'<td>{_gc_tag(state.get(r["sym"], {}), short=True)}</td>'
+        f'<td>{_tag("LEAVES", "dn") if r["sym"] in leaving else _tag("STAYS", "mute")}</td></tr>'
+        for r in v["rows"])
+    nxt_in = set(v["next_in"])
+    ranking = "".join(
+        f'<tr data-sym="{e(sym)}"><td class="r mu">{k}</td><td>{_tv(sym)}{" " + _tag("NEW", "ok") if sym in nxt_in else ""}</td>'
+        f'<td class="mu hide-md">{e(sectors.get(sym, "—"))}</td><td class="r">{_pct(sc * 100)}</td>'
+        f'<td>{_gc_tag(state.get(sym, {}), short=True)}</td></tr>'
+        for k, (sym, sc) in enumerate(v["ranking"][:30], 1))
+    hist = "".join(
+        f'<tr><td>{e(mon(h["month"]))}</td><td class="r">{pct(h["net"])}</td>'
+        f'<td class="r">{pct(h["bench"].get("NIFTY 200"))}</td><td class="r">{pct(h["bench"].get("Momentum ETF"))}</td>'
+        f'<td class="r">{pct(h.get("ew"))}</td><td class="r">{h["turnover"] * 100:.0f}%</td></tr>' for h in reversed(v["history"]))
+    chips = lambda xs, kind: " ".join(f'<span class="tag {kind}">{e(x)}</span>' for x in xs) or '<span class="fa">none</span>'  # noqa: E731
+
+    def tbl(head, rows, empty):
+        return (f'<div class="panel tw"><table><thead><tr>{head}</tr></thead><tbody>'
+                f'{rows or f"<tr><td colspan=9 class=empty>{empty}</td></tr>"}</tbody></table></div>')
+
+    return f"""<div class="sh"><h2>Momentum portfolio — paper tracking</h2><span class="meta">top {MOM_TOP} by 12-1 momentum · equal weight · rebalanced monthly</span></div>
+<div class="kpis">{kpis}</div>
+<section><div class="sh"><h2>Holdings — {e(mon(v["month"]))}</h2><span class="meta">bought at the open on {e(fmt_day(v["start"]))} · turnover {v["turnover"] * 100:.0f}% · costs included</span></div>
+{tbl('<th class="r">#</th><th>Stock</th><th class="hide-md">Sector</th><th class="r">12-1 momentum</th><th class="r">Entry</th><th class="r">Now</th><th class="r">Month to date</th><th>Daily trend</th><th>Next month</th>', hold, "")}</section>
+<div class="grid2"><section><div class="sh"><h2>Next month — {e(mon(v["next_month"]))}</h2><span class="meta">ranking ends a month back, so this list is already fixed</span></div>
+<div class="panel" style="padding:14px 16px;font-size:13px;line-height:2"><b>Coming in:</b> {chips(v["next_in"], "up")}<br>
+<b>Going out:</b> {chips(v["next_out"], "dn")}</div>
+<div style="margin-top:12px">{tbl('<th class="r">#</th><th>Stock</th><th class="hide-md">Sector</th><th class="r">12-1 momentum</th><th>Daily trend</th>', ranking, "")}</div></section>
+<section><div class="sh"><h2>Month by month</h2><span class="meta">paper results after costs</span></div>
+{tbl('<th>Month</th><th class="r">Portfolio</th><th class="r">NIFTY 200</th><th class="r">Momentum ETF</th><th class="r">Equal weight</th><th class="r">Turnover</th>', hist, "First month in progress — results appear here as each month closes.")}</section></div>
+<p class="note below"><b>Rules</b> (same as momentum_backtest.py): at each month-end, rank the stocks by their return over the past
+12 months skipping the latest month; hold the top {MOM_TOP} in equal weight from the next month's first open; charge delivery costs
+(~{MOM_COST:.2f}% per round trip) on every stock swapped. Benchmarks: NIFTY 200, a listed Nifty200 Momentum 30 ETF (NSE's real
+momentum index, after fund costs) and an equal-weight portfolio of all the stocks. <b>Read with care:</b> the historical backtest
+(momentum_report.md) is inflated by survivorship bias — over Aug 2022 – Sep 2026 the real momentum ETF beat the Nifty 200 by about
+2.7 points a year, against ~19 in the backtest. This tab is a forward paper record from {e(mon(since))}, so it carries no such bias.
+Paper tracking only — not a recommendation; speak to a SEBI-registered adviser before investing.</p>"""
+
+
 def write_dashboard(state):
     """Render dashboard.html from the state file — a static page with four tabs:
     Live (indices, today's confirmations and signals), Past signals (day-wise
@@ -1506,6 +1711,7 @@ stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
 <nav class="tabs"><button class="tab" data-v="live">Live<span class="n">{len(today)}</span></button>
 <button class="tab" data-v="past">Past signals<span class="n">{len(past)}</span></button>
 <button class="tab" data-v="accuracy">Accuracy</button>
+<button class="tab" data-v="momentum">Momentum</button>
 <button class="tab" data-v="stocks">Stocks<span class="n">{len(stocks)}</span></button></nav>
 </div></div>
 
@@ -1593,6 +1799,10 @@ the flip; <b>Max gain</b> / <b>Max drawdown</b> = the furthest price went in the
 <b>Simulator</b>: a trade exits at the target or stop, whichever price reaches first (if both are touched in the same 15-min candle
 it assumes the stop — the cautious choice); otherwise at the flip. Open signals that haven't hit either level aren't counted.
 Ignores brokerage, taxes and slippage.</p>
+</div>
+
+<div class="view" id="v-momentum">
+{_momentum_view_html(state, meta.get("sectors", {}))}
 </div>
 
 <div class="view" id="v-stocks">
@@ -1928,6 +2138,10 @@ def scan_once(per_symbol_delay=None):
             time.sleep(delay * random.uniform(0.7, 1.3))
 
     fired.extend(scan_indices(state))
+    try:
+        update_momentum(state, universe)
+    except Exception as e:  # noqa: BLE001 — never let the paper tracker break alerts
+        print(f"[warn] momentum update failed: {e}")
 
     now_str = f"{datetime.now(IST):%Y-%m-%d %H:%M:%S}"
     log = state.get(SIGNAL_LOG_KEY, [])
