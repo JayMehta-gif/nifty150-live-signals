@@ -9,3 +9,4 @@ bars_cache.pkl
 backtest_trades.csv
 index_backtest_trades.csv
 ema_data_cache.pkl
+momentum_monthly*.csv
