@@ -786,6 +786,8 @@ def format_alert(fired, confirmed=(), html=True):
 
 TELEGRAM_MODE = os.environ.get("TELEGRAM_MODE", "gated").strip().lower() or "gated"
 TELEGRAM_UNTIL = os.environ.get("TELEGRAM_UNTIL", "").strip()  # e.g. "14:00": no alerts after that
+# Which names may alert on Telegram: comma-separated, or "all". Default: the NIFTY 50 index only.
+TELEGRAM_SYMBOLS = os.environ.get("TELEGRAM_SYMBOLS", "").strip() or "NIFTY 50"
 
 
 def telegram_filter(fired, confirmed, now=None, gate_flags=None):
@@ -794,8 +796,14 @@ def telegram_filter(fired, confirmed, now=None, gate_flags=None):
                   confirmations that pass the 1-hour gate (default)
       all       — every signal + double confirmations
       confirmed — double confirmations + index signals only
-    and TELEGRAM_UNTIL, a cut-off time after which nothing is sent."""
+    after limiting to TELEGRAM_SYMBOLS (default "NIFTY 50"; "all" = every
+    stock and index), and TELEGRAM_UNTIL, a cut-off time after which nothing
+    is sent."""
     now = now or datetime.now(IST)
+    if TELEGRAM_SYMBOLS.lower() != "all":
+        allowed = {x.strip().upper() for x in TELEGRAM_SYMBOLS.split(",") if x.strip()}
+        fired = [f for f in fired if f[1].upper() in allowed]
+        confirmed = [c for c in confirmed if c[0].upper() in allowed]
     if TELEGRAM_UNTIL:
         try:
             hh, mm = map(int, TELEGRAM_UNTIL.split(":"))

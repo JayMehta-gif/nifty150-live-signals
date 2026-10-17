@@ -62,6 +62,8 @@ jobs:
           # TELEGRAM_MODE = gated (default: 1-hour gate) | all | confirmed ; TELEGRAM_UNTIL = HH:MM cut-off
           TELEGRAM_MODE: ${{ vars.TELEGRAM_MODE }}
           TELEGRAM_UNTIL: ${{ vars.TELEGRAM_UNTIL }}
+          # TELEGRAM_SYMBOLS = NIFTY 50 (default) | comma-separated names | all
+          TELEGRAM_SYMBOLS: ${{ vars.TELEGRAM_SYMBOLS }}
         run: python -u nifty150_live_signals.py ${{ inputs.test_telegram && '--test-telegram' || (inputs.full_scan && '--test' || '--once') }}
 
       # The scan (or, outside market hours, the last saved state) writes
