@@ -456,6 +456,48 @@ def htf_trends(symbol, yf_ticker, df15):
     return out
 
 
+DAILY_HISTORY = "5y"  # daily candles behind the golden-cross trend (long, so EMA200 has settled)
+FRESH_CROSS_DAYS = 10
+
+
+def daily_ema_trend(symbol, yf_ticker, df15):
+    """Daily EMA 50 / 100 / 200 trend, as on the TradingView "EMA 50, 100 and
+    200" indicator: gc = +1 golden (EMA50 above EMA200) / -1 death, with the date
+    of the last cross and sessions since; ec = early-cross state (EMA50 vs EMA100);
+    ema200_dist = % price is above/below EMA200. Two years of daily candles are
+    downloaded once a day (cached); today's close is the latest 15-min close."""
+    cache = load_bars_cache()
+    key = f"{yf_ticker}|1d"
+    today = datetime.now(IST).date()
+    hist = cache.get(key)
+    if hist is None or hist.attrs.get("full_fetch") != str(today):
+        got = _download(symbol, yf_ticker, DAILY_HISTORY, interval="1d")
+        if got is not None:
+            hist = got.copy()
+            hist.attrs["full_fetch"] = str(today)
+            cache[key] = hist
+    if hist is None or df15 is None or df15.empty:
+        return {}
+    last_day = df15.index[-1].date()
+    closes = hist[hist.index.date < last_day]["close"]
+    days = list(closes.index.date) + [last_day]
+    c = pd.Series(list(closes.to_numpy()) + [float(df15["close"].iloc[-1])])
+    if len(c) < 220:
+        return {}
+    e50, e100, e200 = (c.ewm(span=n, adjust=False).mean().to_numpy() for n in (50, 100, 200))
+
+    def last_cross(fast, slow):
+        side = np.sign(fast - slow)
+        flips = np.nonzero(side[1:] != side[:-1])[0]
+        k = int(flips[-1]) + 1 if len(flips) else 0
+        return int(side[-1]), str(days[k]), int(len(side) - 1 - k)
+
+    gc, gc_date, gc_days = last_cross(e50, e200)
+    ec, ec_date, ec_days = last_cross(e50, e100)
+    return {"gc": gc, "gc_date": gc_date, "gc_days": gc_days, "ec": ec, "ec_date": ec_date,
+            "ec_days": ec_days, "ema200_dist": round(float((c.iloc[-1] / e200[-1] - 1) * 100), 2)}
+
+
 def htf_at(htf, frame, ts):
     """Higher-timeframe trend (1 / -1, 0 if unknown) as of `ts` (tz-aware
     Timestamp), from the last candle of that frame that had closed by then."""
@@ -478,7 +520,8 @@ def _download(symbol, yf_ticker, period, interval="15m"):
             df = df.rename(columns=str.lower)
             if df.index.tz is not None:
                 df.index = df.index.tz_convert(IST)
-            df = df.between_time("09:15", "15:30")
+            if interval != "1d":  # daily candles are stamped at midnight
+                df = df.between_time("09:15", "15:30")
             return df.dropna(subset=["open", "close"])[["open", "high", "low", "close", "volume"]]
         except Exception as e:
             msg = str(e).lower()
@@ -722,6 +765,7 @@ overflow:hidden;text-overflow:ellipsis}
 /* kpis */
 .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:26px}
 .kpis.k3{grid-template-columns:repeat(3,1fr);margin-top:-16px}
+.kpis.k5{grid-template-columns:repeat(5,1fr)}
 .kpi{padding:13px 15px}.kpi .k{font-size:12px;color:var(--muted);font-weight:500}
 .kpi .v{font-size:24px;font-weight:700;letter-spacing:-.02em;margin:2px 0}
 .kpi .s{font-size:12px;color:var(--muted)}
@@ -777,13 +821,14 @@ a.tv{color:inherit;text-decoration:none}a.tv:hover{text-decoration:underline;col
 tr.secrow{cursor:pointer}tr.secrow.on td{background:var(--accent-bg)}
 #eq svg{display:block;width:100%;height:220px}#eq .lg{display:flex;gap:16px;font-size:12px;color:var(--muted);margin-bottom:6px}
 #eq .lg i{display:inline-block;width:14px;height:3px;border-radius:2px;vertical-align:middle;margin-right:6px}
-@media (max-width:980px){.grid2{grid-template-columns:1fr}}
+@media (max-width:980px){.grid2{grid-template-columns:1fr}.kpis.k5{grid-template-columns:repeat(3,1fr)}}
 .foot{font-size:12px;color:var(--faint);padding:14px 0 0;border-top:1px solid var(--line);line-height:1.6}
 @media (max-width:1100px){.hide-md{display:none}}
 @media (max-width:980px){.idx{grid-template-columns:repeat(3,1fr)}}
 @media (max-width:700px){.wrap{padding:0 14px}.brand .sub{display:none}
 .idx{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;margin:0 -14px 20px;padding:0 14px 4px}
 .idx .ix{flex:0 0 46%;scroll-snap-align:start}.kpis{grid-template-columns:repeat(2,1fr)}
+.kpis.k5{grid-template-columns:repeat(2,1fr)}
 .kpis.k3{grid-template-columns:1fr}
 .hide-sm{display:none}td,th{padding:8px 9px}.status .lbl{display:none}.status{padding:0 9px}}
 """.replace("DARK", """--bg:#000;--panel:#000;--fg:#f1f5f9;--muted:#8a94a6;--faint:#5b6577;--line:#1c1f26;
@@ -828,7 +873,7 @@ function filterer(tbodySel,countSel){const rows=$$(tbodySel+' tr[data-sym]'),f={
   r.style.display=ok?'':'none';n+=ok}
   if(countSel)$(countSel).textContent=n+' shown';const e=$(tbodySel+' .nores');if(e)e.style.display=n?'none':'';};
  return {set(k,v){f[k]=v;run()},run}}
-const VIEWS={all:()=>true,fav:d=>FAV.has(d.sym),stale:d=>d.stale==='1',mtf:d=>d.st!=='0'&&d.st===d.tf2&&d.st===d.tf1,aligned:d=>(d.st==='1'&&+d.adx>0)||(d.st==='-1'&&+d.adx<0),near:d=>+d.dist<=NEAR,
+const VIEWS={all:()=>true,golden:d=>d.gc==='1',death:d=>d.gc==='-1',fresh:d=>+d.gcd<=10,fav:d=>FAV.has(d.sym),stale:d=>d.stale==='1',mtf:d=>d.st!=='0'&&d.st===d.tf2&&d.st===d.tf1,aligned:d=>(d.st==='1'&&+d.adx>0)||(d.st==='-1'&&+d.adx<0),near:d=>+d.dist<=NEAR,
  long:d=>d.st==='1',short:d=>d.st==='-1',abuy:d=>+d.adx>0,asell:d=>+d.adx<0};
 const live=filterer('#t-live tbody');seg($('#f-live-dir'),v=>live.set('dir',v));
 seg($('#f-live-gate'),v=>live.set('gate',v==='all'?'all':'both'));live.set('gate','both');
@@ -1081,6 +1126,21 @@ def _gate_tags(g2, g1):
             f'<span class="tag {"ok" if g1 else "mute"}" title="Daily trend {"agrees" if g1 else "does not agree"}">1D</span>')
 
 
+def _gc_tag(info, short=False):
+    """Golden / death cross badge with sessions since the cross."""
+    gc = info.get("gc")
+    if gc not in (1, -1):
+        return '<span class="fa">—</span>'
+    days = info.get("gc_days")
+    fresh = days is not None and days <= FRESH_CROSS_DAYS
+    label = ("GOLDEN" if gc == 1 else "DEATH") + ("" if short else " CROSS")
+    since = info.get("gc_date", "")
+    title = (f'Daily EMA50 {"above" if gc == 1 else "below"} EMA200 since {fmt_day(since)} ({days} sessions)'
+             if since else "")
+    return (f'<span class="tag {"up" if gc == 1 else "dn"}" title="{html_lib.escape(title)}">{label}</span>'
+            f'<span class="sm"> {days}d{" · new" if fresh else ""}</span>')
+
+
 def _tf_tag(v):
     return {1: _tag("UP", "up"), -1: _tag("DOWN", "dn")}.get(v, '<span class="fa">—</span>')
 
@@ -1208,7 +1268,8 @@ def write_dashboard(state):
             f'<span class="sm">{dist_txt}</span></div>'
             f'<div class="tags">{_st_tag(info.get("st_trend"))}{_adx_tag(info.get("adx_cond"))}</div>'
             f'<div class="tags" title="2-hour / daily SuperTrend"><span class="sm">2H</span>{_tf_tag(info.get("tf2h"))}'
-            f'<span class="sm">1D</span>{_tf_tag(info.get("tf1d"))}</div></div>')
+            f'<span class="sm">1D</span>{_tf_tag(info.get("tf1d"))}</div>'
+            f'<div class="tags">{_gc_tag(info, short=True)}</div></div>')
 
     # ── live: today's signals + confirmations
     latest_day = log[-1]["time"][:10] if log else None
@@ -1237,6 +1298,10 @@ def write_dashboard(state):
         return info.get("tf2h") == want, info.get("tf1d") == want
 
     n_gated = sum(1 for s in today if all(live_gates(s["name"], s["label"], s)))
+    n_golden = sum(v.get("gc") == 1 for v in stocks.values())
+    n_death = sum(v.get("gc") == -1 for v in stocks.values())
+    n_fresh = sum(1 for v in stocks.values() if v.get("gc") in (1, -1)
+                  and v.get("gc_days") is not None and v["gc_days"] <= FRESH_CROSS_DAYS)  # 0 = crossed today
     kpis = (
         f'<div class="panel kpi"><div class="k">Signals {"today" if latest_day else ""}</div>'
         f'<div class="v">{len(today)}</div><div class="s"><span class="up">{n_buy} buy</span> · '
@@ -1248,6 +1313,9 @@ def write_dashboard(state):
         f'<div class="panel kpi"><div class="k">SuperTrend</div><div class="v">{st_long}'
         f'<span class="mu" style="font-size:14px"> / {st_short}</span></div><div class="s">long / short</div>'
         f'{split(st_long, st_short)}</div>'
+        f'<div class="panel kpi"><div class="k">Golden cross (daily)</div><div class="v">{n_golden}'
+        f'<span class="mu" style="font-size:14px"> / {n_death}</span></div><div class="s">golden / death · '
+        f'{n_fresh} crossed in the last {FRESH_CROSS_DAYS} sessions</div>{split(n_golden, n_death)}</div>'
         f'<div class="panel kpi"><div class="k">ADX DI</div><div class="v">{adx_buy}'
         f'<span class="mu" style="font-size:14px"> / {adx_sell}</span></div><div class="s">buy / sell state</div>'
         f'{split(adx_buy, adx_sell)}</div>')
@@ -1374,12 +1442,14 @@ def write_dashboard(state):
             f'<tr data-sym="{e(sym)}" data-sector="{e(sector)}" data-stale="{int(sym in stale)}" '
             f'data-st="{st}" data-adx="{adx}" data-dist="{dist if dist is not None else 999}" '
             f'data-chg="{chg if chg is not None else 0}" data-px="{info.get("last_close") or 0}" '
-            f'data-mv="{mv if mv is not None else -999}" data-tf2="{info.get("tf2h", 0)}" data-tf1="{info.get("tf1d", 0)}"'
+            f'data-mv="{mv if mv is not None else -999}" data-tf2="{info.get("tf2h", 0)}" data-tf1="{info.get("tf1d", 0)}" '
+            f'data-gc="{info.get("gc", 0)}" data-gcd="{info.get("gc_days", 999) if info.get("gc") else 999}" '
+            f'data-gck="{info.get("gc", 0) * 10000 - (info.get("gc_days") or 0)}"'
             f'{" class=fresh" if sym in fresh else ""}>'
             f'<td><button class="star" data-fav="{e(sym)}" aria-label="Favourite">☆</button>{_tv(sym)}{stale_tag}</td>'
             f'<td class="mu hide-md">{e(sector)}</td><td class="r">{_fmt_price(info.get("last_close"))}</td>'
             f'<td class="r">{_pct(chg)}</td><td>{_st_tag(st)}</td><td>{_tf_tag(info.get("tf2h"))}</td>'
-            f'<td>{_tf_tag(info.get("tf1d"))}</td><td>{_adx_tag(adx)}</td>'
+            f'<td>{_tf_tag(info.get("tf1d"))}</td><td>{_adx_tag(adx)}</td><td>{_gc_tag(info)}</td>'
             f'<td class="r">{dist_s}</td>'
             f'<td>{(_tag(ls["label"]) + " " + _pct(mv) + "<div class=sm>" + e(fmt_stamp(ls["time"])) + max_txt + "</div>") if ls else "<span class=fa>—</span>"}</td></tr>')
 
@@ -1393,11 +1463,13 @@ def write_dashboard(state):
         ab = sum((v.get("adx_cond") or 0) > 0 for v in vs)
         asl = sum((v.get("adx_cond") or 0) < 0 for v in vs)
         chgs = [v["day_chg_pct"] for v in vs if v.get("day_chg_pct") is not None]
+        gold = sum(v.get("gc") == 1 for v in vs)
         sector_rows.append(
             f'<tr data-sym="{e(sec)}" data-sec="{e(sec)}" class="secrow"><td class="sym">{e(sec)}</td><td class="r">{n}</td>'
             f'<td><div class="wr"><span style="min-width:38px">{lng / n * 100:.0f}%</span><span class="tr">'
             f'<b class="{"lo" if lng / n < 0.5 else ""}" style="width:{lng / n * 100:.0f}%"></b></span></div></td>'
             f'<td class="r"><span class="up">{ab}</span> / <span class="dn">{asl}</span></td>'
+            f'<td class="r">{gold}/{n} <span class="sm">golden</span></td>'
             f'<td class="r">{_pct(sum(chgs) / len(chgs) if chgs else None)}</td></tr>')
     sector_opts = '<option value="">All sectors</option>' + "".join(
         f'<option value="{e(sec)}">{e(sec)} · {len(vs)}</option>' for sec, vs in sorted(by_sector.items()))
@@ -1440,7 +1512,7 @@ stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
 <main class="wrap">
 <div class="view" id="v-live">
 <div class="idx">{"".join(ix_html) or '<div class="panel empty" style="grid-column:1/-1">No index data yet.</div>'}</div>
-<div class="kpis">{kpis}</div>
+<div class="kpis k5">{kpis}</div>
 <section><div class="sh"><h2>Double confirmations</h2><span class="meta">{e(fmt_day(latest_day)) if latest_day else ""}</span></div>
 <p class="note">SuperTrend and ADX DI gave the same signal on the same day — the latest signal of each counts.</p>
 {table("t-conf", '<th>Stock</th><th>Setup</th><th>Gates</th><th>SuperTrend</th><th>ADX DI</th><th class="r">At signal</th><th class="r">Now</th><th class="r">Move</th><th class="r">Max gain</th><th class="r hide-sm">Max drawdown</th>',
@@ -1525,20 +1597,24 @@ Ignores brokerage, taxes and slippage.</p>
 
 <div class="view" id="v-stocks">
 <section><div class="sh"><h2>Sector breadth</h2><span class="meta">tap a sector to filter the stocks below</span></div>
-{table("t-sectors", '<th>Sector</th><th class="r">Stocks</th><th>SuperTrend long</th><th class="r">ADX buy / sell</th><th class="r">Avg day</th>',
+{table("t-sectors", '<th>Sector</th><th class="r">Stocks</th><th>SuperTrend long</th><th class="r">ADX buy / sell</th><th class="r">Golden cross</th><th class="r">Avg day</th>',
        "".join(sector_rows), "No sector data yet.")}</section>
 <div class="sh"><h2>All stocks</h2><span class="meta" id="c-stocks"></span></div>
 <div class="tb"><input type="search" id="f-stk-q" placeholder="Search stock…" autocomplete="off">
 <select class="sel" id="f-stk-sector" aria-label="Sector">{sector_opts}</select>
-<div class="seg" id="f-stk-view"><button class="on" data-f="all">All</button><button data-f="fav" title="Your starred stocks">★</button><button data-f="mtf" title="15-min, 2-hour and daily SuperTrend all point the same way">All TFs aligned</button><button data-f="aligned" title="SuperTrend and ADX DI point the same way">Aligned</button>
+<div class="seg" id="f-stk-view"><button class="on" data-f="all">All</button><button data-f="fav" title="Your starred stocks">★</button><button data-f="mtf" title="15-min, 2-hour and daily SuperTrend all point the same way">All TFs aligned</button>
+<button data-f="golden" title="Daily EMA50 above EMA200">Golden cross</button><button data-f="death" title="Daily EMA50 below EMA200">Death cross</button>
+<button data-f="fresh" title="Golden or death cross in the last 10 sessions">New cross</button><button data-f="aligned" title="SuperTrend and ADX DI point the same way">Aligned</button>
 <button data-f="near" title="Within {WATCHLIST_PCT:g}% of a SuperTrend flip">Near flip</button><button data-f="long">ST long</button>
 <button data-f="short">ST short</button><button data-f="abuy">ADX buy</button><button data-f="asell">ADX sell</button>
 <button data-f="stale" title="Latest candle older than the rest">Stale</button></div></div>
-{table("t-stocks", '<th data-k="sym" data-asc="1">Stock</th><th class="hide-md" data-k="sector" data-asc="1">Sector</th><th class="r" data-k="px" data-asc="0">Price</th><th class="r" data-k="chg" data-asc="0">Day</th><th data-k="st" data-asc="0">SuperTrend</th><th data-k="tf2" data-asc="0" title="2-hour SuperTrend">2H</th><th data-k="tf1" data-asc="0" title="Daily SuperTrend">1D</th><th data-k="adx" data-asc="0">ADX DI</th><th class="r sorted" data-k="dist" data-asc="1">To flip</th><th data-k="mv" data-asc="0">Last signal</th>',
+{table("t-stocks", '<th data-k="sym" data-asc="1">Stock</th><th class="hide-md" data-k="sector" data-asc="1">Sector</th><th class="r" data-k="px" data-asc="0">Price</th><th class="r" data-k="chg" data-asc="0">Day</th><th data-k="st" data-asc="0">SuperTrend</th><th data-k="tf2" data-asc="0" title="2-hour SuperTrend">2H</th><th data-k="tf1" data-asc="0" title="Daily SuperTrend">1D</th><th data-k="adx" data-asc="0">ADX DI</th><th data-k="gck" data-asc="0" title="Daily EMA50 vs EMA200 — golden / death cross, sessions since">Daily trend</th><th class="r sorted" data-k="dist" data-asc="1">To flip</th><th data-k="mv" data-asc="0">Last signal</th>',
        "".join(stock_rows), "No stocks match.", "dist")}
 </div>
 
 <div class="foot">All times IST. Data: Yahoo Finance (~15 min delayed); this page refreshes every 5 minutes.
+Golden / death cross = daily EMA50 above / below EMA200 (the TradingView "EMA 50, 100 and 200" indicator) — a
+trend read, not a trade signal: in backtests (ema_cross_report.md) trading the crosses lagged buy-and-hold.
 SELL signals, the stage gates and the accuracy figures are not from the original backtests. Not investment advice.</div>
 </main>
 <script>{data_js}</script>
@@ -1786,6 +1862,7 @@ def scan_indices(state):
             if df is None or len(df) < 60:
                 continue
             state[key], index_fired = evaluate(name, df, state.get(key, {}), htf_trends(name, yf_ticker, df))
+            state[key].update(daily_ema_trend(name, yf_ticker, df))
             archive_history(state, state[key])
             fired.extend(index_fired)
         except Exception as e:
@@ -1829,6 +1906,7 @@ def scan_once(per_symbol_delay=None):
 
             state[symbol], symbol_fired = evaluate(symbol, df, state.get(symbol, {}),
                                                    htf_trends(symbol, f"{symbol}.NS", df))
+            state[symbol].update(daily_ema_trend(symbol, f"{symbol}.NS", df))
             archive_history(state, state[symbol])
             fired.extend(symbol_fired)
             checked += 1
