@@ -1658,25 +1658,39 @@ def write_dashboard(state):
         f'{excursion_cells(_match_replay(archive, s["name"], (s["strategy"],), _direction(s["label"]), s["time"][:10], s["time"]))}</tr>'
         for s in today)
 
-    # ── daily EMA crosses (last DAILY_CROSS_DAYS sessions), newest first
-    crosses = []
+    # ── daily EMA crosses (last DAILY_CROSS_DAYS sessions): one row per stock,
+    # the latest cross of each EMA pair, newest first
+    by_stock = {}
     for key, info in state.items():
         if not isinstance(info, dict) or not info.get("dx"):
             continue
         nm = info.get("name") or key
         for x in info["dx"]:
-            crosses.append((x, nm, _current_price(state, nm)))
-    crosses.sort(key=lambda t: (t[0]["date"], t[1]), reverse=True)
+            by_stock.setdefault(nm, {}).setdefault(x["k"], []).append(x)
 
-    def cross_row(x, nm, now_px):
+    def cross_cell(xs, now_px):
+        if not xs:
+            return '<td><span class="fa">—</span></td>'
+        x = max(xs, key=lambda c: c["date"])
         mv = (now_px / x["px"] - 1) * 100 * x["d"] if now_px and x["px"] else None
-        kind = "EMA 50×200" if x["k"] == "EMA_GOLDEN" else "EMA 50×100"
         what = (("GOLDEN" if x["d"] == 1 else "DEATH") if x["k"] == "EMA_GOLDEN" else ("BUY" if x["d"] == 1 else "SELL"))
-        forming = ' <span class="tag mute" title="Today\'s candle is still open — final at 3:30 PM">forming</span>' if x["f"] else ""
-        return (f'<tr data-sym="{e(nm)}" data-t="12:00" data-dir="{"buy" if x["d"] == 1 else "sell"}"><td class="mu">{e(fmt_day(x["date"]))}</td>'
-                f'<td>{_tv(nm)}</td><td>{_tag(what, "up" if x["d"] == 1 else "dn")}{forming}</td><td class="mu hide-sm">{kind}</td>'
-                f'<td class="r">{_fmt_price(x["px"])}</td><td class="r">{_fmt_price(now_px)}</td><td class="r">{_pct(mv)}</td></tr>')
-    cross_rows = "".join(cross_row(*t) for t in crosses)
+        forming = ' <span class="tag mute" title="Today’s candle is still open — final at 3:30 PM">forming</span>' if x["f"] else ""
+        chop = (f' <span class="tag mute" title="Crossed {len(xs)} times in {DAILY_CROSS_DAYS} sessions — choppy, the latest is shown">'
+                f'×{len(xs)}</span>' if len(xs) > 1 else "")
+        return (f'<td>{_tag(what, "up" if x["d"] == 1 else "dn")}{forming}{chop}'
+                f'<div class="sm">{e(fmt_day(x["date"]))} · at {_fmt_price(x["px"])} · {_pct(mv)}</div></td>')
+
+    cross_list = []
+    for nm, kinds in by_stock.items():
+        latest = max(x["date"] for xs in kinds.values() for x in xs)
+        now_px = _current_price(state, nm)
+        info = state.get(nm) or state.get(INDEX_STATE_PREFIX + nm) or {}
+        cross_list.append((latest, nm, (
+            f'<tr data-sym="{e(nm)}" data-t="12:00"><td>{_tv(nm)}</td>'
+            f'{cross_cell(kinds.get("EMA_EARLY"), now_px)}{cross_cell(kinds.get("EMA_GOLDEN"), now_px)}'
+            f'<td class="r">{_fmt_price(now_px)}</td><td class="hide-sm">{_gc_tag(info, short=True)}</td></tr>')))
+    cross_list.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    cross_rows = "".join(r for _, _, r in cross_list)
 
     # 5-year record of the daily crosses, for the Accuracy tab (all stocks / Nifty 100)
     def cross_record(names):
@@ -1878,7 +1892,7 @@ stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
        conf_rows, "No double confirmations today yet.")}</section>
 <section><div class="sh"><h2>Daily EMA crosses</h2><span class="meta" id="c-dx">last {DAILY_CROSS_DAYS} sessions</span></div>
 <p class="note">EMA50 crossing EMA100 (early cross) or EMA200 (golden / death cross) on daily candles — the TradingView "EMA 50, 100 and 200" indicator.</p>
-{table("t-dx", '<th>Day</th><th>Stock</th><th>Cross</th><th class="hide-sm">EMAs</th><th class="r">At cross</th><th class="r">Now</th><th class="r">Move</th>',
+{table("t-dx", '<th>Stock</th><th title="EMA50 crossing EMA100 — latest cross in the window">EMA 50×100 (early)</th><th title="EMA50 crossing EMA200 — latest cross in the window">EMA 50×200 (golden / death)</th><th class="r">Now</th><th class="hide-sm">Daily trend</th>',
        cross_rows, "No daily EMA crosses in this window.")}</section>
 <details class="more"><summary>All signals today <span class="mu" id="c-live"></span></summary>
 <div class="tb" style="margin:12px 0"><div class="seg" id="f-live-dir"><button class="on" data-f="all">All</button>
