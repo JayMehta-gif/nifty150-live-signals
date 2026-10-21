@@ -1034,10 +1034,9 @@ function filterer(tbodySel,countSel){const rows=$$(tbodySel+' tr[data-sym]'),f={
   r.style.display=ok?'':'none';n+=ok}
   if(countSel)$(countSel).textContent=n+' shown';const e=$(tbodySel+' .nores');if(e)e.style.display=n?'none':'';};
  return {set(k,v){f[k]=v;run()},run}}
-const VIEWS={all:()=>true,golden:d=>d.gc==='1',death:d=>d.gc==='-1',fresh:d=>+d.gcd<=10,fav:d=>FAV.has(d.sym),stale:d=>d.stale==='1',mtf:d=>d.st!=='0'&&d.st===d.tf1h,aligned:d=>(d.st==='1'&&+d.adx>0)||(d.st==='-1'&&+d.adx<0),near:d=>+d.dist<=NEAR,
+const VIEWS={all:()=>true,golden:d=>d.gc==='1',death:d=>d.gc==='-1',fresh:d=>+d.gcd<=10,fav:d=>FAV.has(d.sym),stale:d=>d.stale==='1',aligned:d=>(d.st==='1'&&+d.adx>0)||(d.st==='-1'&&+d.adx<0),near:d=>+d.dist<=NEAR,
  long:d=>d.st==='1',short:d=>d.st==='-1',abuy:d=>+d.adx>0,asell:d=>+d.adx<0};
 const live=filterer('#t-live tbody');seg($('#f-live-dir'),v=>live.set('dir',v));
-seg($('#f-live-gate'),v=>live.set('gate',v==='all'?'all':'both'));live.set('gate','all');
 /* shared archive (ARCH/NAMES/PX/PDAYS come from the data script).
    ARCH row: [time, name#, label, strategy 0 ST/1 ADX/2 CONFIRMED, price, exit, bars, open, max gain, max drawdown] */
 const SN=['SuperTrend','ADX_DI','CONFIRMED','EMA_EARLY','EMA_GOLDEN'];
@@ -1049,9 +1048,7 @@ const mvOf=r=>{const px=r[7]?PX[r[1]]:r[5];if(!px||!r[4])return null;const m=(px
    [time, name, label, strategy, price, exit, move, bars, open, confirmed, max gain, max drawdown, 1H gate] */
 const PAST=ARCH.filter(r=>isSig(r)&&PDAYS.has(r[0].slice(0,10))).reverse().map(r=>[r[0],NAMES[r[1]],r[2],SN[r[3]],r[4],
  r[7]?null:r[5],mvOf(r),r[6],r[7],CONF.has(r[0].slice(0,10)+'|'+r[1])?1:0,r[8],r[9],r[12]]);
-const gb=gh=>'<span class="tag '+(gh?'ok':'mute')+'">1H</span>';
-const gateOk=(g,gh)=>g==='all'||!!gh;
-const PT=$('#t-past tbody'),pf={day:'',dir:'all',strat:'all',conf:false,sym:'',sess:'',str:'all',fav:false,gate:'all'};let pk='t',pa=false;
+const PT=$('#t-past tbody'),pf={day:'',dir:'all',strat:'all',conf:false,sym:'',sess:'',str:'all',fav:false};let pk='t',pa=false;
 const fp=v=>v==null?'—':v.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
 const tg=l=>'<span class="tag '+(l.includes('SELL')?'dn':'up')+'">'+l.replace('_',' ')+'</span>';
 const pc=v=>v==null?'<span class="fa">—</span>':Math.abs(v)<0.005?'<span class="mu">0.00%</span>':
@@ -1062,12 +1059,12 @@ const dshort=t=>+t.slice(8,10)+' '+MON[+t.slice(5,7)-1];
 const bt=(b,o)=>b==null?'—':o?(b===0?'<span class="tag ok">new</span>':'<span class="mu">'+b+'+</span>'):b;
 function renderPast(){const rows=PAST.filter(r=>r[0].startsWith(pf.day)&&(pf.dir==='all'||(pf.dir==='sell')===r[2].includes('SELL'))
  &&(pf.strat==='all'||r[3]===pf.strat)&&(!pf.conf||r[9])&&(!pf.sym||r[1]===pf.sym)&&(!pf.fav||FAV.has(r[1]))
- &&(pf.str==='all'||(pf.str==='strong')===r[2].endsWith('STRONG'))&&gateOk(pf.gate,r[12])
+ &&(pf.str==='all'||(pf.str==='strong')===r[2].endsWith('STRONG'))
  &&(!pf.sess||(r[0].slice(11,16)>=pf.sess.slice(0,5)&&r[0].slice(11,16)<pf.sess.slice(6))));
  const i={t:0,sym:1,mv:6,bars:7,mfe:10,mae:11}[pk];rows.sort((a,b)=>{const x=a[i],y=b[i];
   const v=typeof x==='string'?x.localeCompare(y):(x??-999)-(y??-999);return pa?v:-v});
  PT.innerHTML=rows.map(r=>'<tr><td class="mu">'+(pf.day?'':dshort(r[0])+', ')+t12(r[0])+'</td><td>'+tvA(r[1])+(r[9]?' <span class="tag ok">✓</span>':'')+
-  '</td><td>'+tg(r[2])+'</td><td>'+gb(r[12])+'</td><td class="mu hide-md">'+SNAME[r[3]]+'</td><td class="r hide-sm">'+fp(r[4])+
+  '</td><td>'+tg(r[2])+'</td><td class="mu hide-md">'+SNAME[r[3]]+'</td><td class="r hide-sm">'+fp(r[4])+
   '</td><td class="r hide-md">'+(r[8]?'<span class="fa">open</span>':fp(r[5]))+'</td><td class="r">'+pc(r[6])+'</td><td class="r">'+pc(r[10])+'</td><td class="r hide-sm">'+pc(r[11])+
   '</td><td class="r">'+bt(r[7],r[8])+'</td></tr>').join('')
   ||'<tr><td colspan="11" class="empty">No signals match these filters.</td></tr>';
@@ -1080,7 +1077,7 @@ seg($('#f-past-dir'),v=>{pf.dir=v;renderPast()});seg($('#f-past-strat'),v=>{pf.s
 $('#f-past-conf').onchange=e=>{pf.conf=e.target.checked;renderPast()};
 $('#f-past-sym').onchange=e=>{pf.sym=e.target.value;renderPast()};
 $('#f-past-sess').onchange=e=>{pf.sess=e.target.value;renderPast()};
-seg($('#f-past-str'),v=>{pf.str=v;renderPast()});seg($('#f-past-gate'),v=>{pf.gate=v;renderPast()});
+seg($('#f-past-str'),v=>{pf.str=v;renderPast()});
 $('#f-past-fav').onchange=e=>{pf.fav=e.target.checked;renderPast()};
 daySel.onchange();
 /* accuracy: overall or for one stock / index */
@@ -1101,23 +1098,12 @@ function accRow(tag,rows){const a=stats(rows);
  return '<tr><td>'+tg(tag)+'</td><td class="r">'+a.n+'</td><td class="r hide-sm">'+a.closed+'</td><td>'+win+'</td><td class="r">'+
   num(a.bars)+'</td><td class="r">'+pc(a.move)+'</td><td class="r">'+pc(a.mfe)+'</td><td class="r">'+pc(a.mae)+
   '</td><td class="r hide-sm">'+pc(a.avg)+'</td><td class="r"><b>'+pc(a.all_avg)+'</b></td><td class="r hide-sm">'+a.open+' · '+pc(a.open_move)+warn+'</td></tr>'}
-let accGate='all';
-function funnelRow(label,rows,days){const a=stats(rows);
- const wr=a.win==null?'<span class="fa">—</span>':'<div class="wr"><span style="min-width:38px">'+a.win.toFixed(0)+'%</span><span class="tr"><b class="'+(a.win<50?'lo':'')+'" style="width:'+a.win.toFixed(0)+'%"></b></span></div>';
- return '<tr><td>'+label+'</td><td class="r">'+a.n+'</td><td class="r">'+(days?(a.n/days).toFixed(1):'—')+'</td><td>'+wr+'</td><td class="r">'+pc(a.avg)+
-  '</td><td class="r">'+pc(a.move)+'</td><td class="r hide-sm">'+pc(a.mfe)+'</td><td class="r hide-sm">'+pc(a.mae)+'</td></tr>'}
-function renderFunnel(all){const days=new Set(all.map(r=>r[0].slice(0,10))).size,s=all.filter(r=>isSig(r)),c=all.filter(r=>r[3]===2),grp=t=>'<tr class="grp"><td colspan="8">'+t+'</td></tr>';
- const stage=rows=>[['① 15-min signal',rows],['② + 1-hour trend agrees',rows.filter(r=>r[12])],
-  ['<span class="mu">filtered out: 1-hour trend disagrees</span>',rows.filter(r=>!r[12])]];
- $('#acc-funnel').innerHTML=grp('All strategy signals')+stage(s).map(([l,r])=>funnelRow(l,r,days)).join('')+
-  grp('Double confirmations')+stage(c).map(([l,r])=>funnelRow(l,r,days)).join('')}
-function renderAcc(sym){const ni=sym?NAMES.indexOf(sym):-1;const scoped=sym?ARCH.filter(r=>r[1]===ni):ARCH;renderFunnel(scoped);
- const rows=scoped.filter(r=>gateOk(accGate,r[12]));
+function renderAcc(sym){const ni=sym?NAMES.indexOf(sym):-1;const scoped=sym?ARCH.filter(r=>r[1]===ni):ARCH;
+ const rows=scoped;
  const sig=rows.filter(r=>isSig(r)),cf=rows.filter(r=>r[3]===2),all=stats(sig),con=stats(cf);
  const days=[...new Set(sig.map(r=>r[0].slice(0,10)))].sort();
  $('#acc-span').textContent=days.length?dshort(days[0])+' – '+dshort(days[days.length-1])+' · '+days.length+' sessions':'no signals';
- $('#acc-what').textContent=(sym?'Accuracy for '+sym+' only':'All '+NAMES.length+' stocks & indices')+
-  (accGate==='all'?'':' · signals passing the 1-hour gate');
+ $('#acc-what').textContent=(sym?'Accuracy for '+sym+' only':'All '+NAMES.length+' stocks & indices');
  $('#acc-kpis').innerHTML=kpi('Signals tracked',all.n,all.closed+' closed · '+all.open+' open')+
   kpi('Win rate (closed)',num(all.win,0,'%'),'moved in the signal’s favour by its flip')+
   kpi('Median bars to flip',num(all.bars),'≈ '+(all.bars==null?'—':(all.bars*15/60).toFixed(1)+' h')+' of trading')+
@@ -1191,7 +1177,7 @@ function renderLeaders(sig){const g={};for(const r of sig)(g[r[1]]=g[r[1]]||[]).
 let accRows=ARCH;
 [simT,simS].forEach(el=>el.onchange=()=>renderSim(accRows));
 const accSel=$('#f-acc-sym');
-seg($('#f-acc-gate'),v=>{accGate=v;renderAcc(accSel.value)});accSel.onchange=()=>{renderAcc(accSel.value);try{localStorage.setItem('accsym',accSel.value)}catch(e){}};
+accSel.onchange=()=>{renderAcc(accSel.value);try{localStorage.setItem('accsym',accSel.value)}catch(e){}};
 try{const v=localStorage.getItem('accsym');if(v&&[...accSel.options].some(o=>o.value===v))accSel.value=v}catch(e){}
 renderAcc(accSel.value);
 const stk=filterer('#t-stocks tbody','#c-stocks');seg($('#f-stk-view'),v=>stk.set('view',v));
@@ -1289,11 +1275,6 @@ def _st_tag(st):
 def _adx_tag(adx):
     label = ADX_LABELS.get(adx, "—")
     return _tag(label) if adx else '<span class="fa">—</span>'
-
-
-def _gate_tags(gh):
-    """Stage-gate badge: 1H lit when the 1-hour trend agrees with the signal."""
-    return f'<span class="tag {"ok" if gh else "mute"}" title="1-hour trend {"agrees" if gh else "does not agree"}">1H</span>'
 
 
 def _gc_tag(info, short=False):
@@ -1504,7 +1485,6 @@ def write_dashboard(state):
             f'<div class="ft">{_pct(info.get("day_chg_pct"))}'
             f'<span class="sm">{dist_txt}</span></div>'
             f'<div class="tags">{_st_tag(info.get("st_trend"))}{_adx_tag(info.get("adx_cond"))}</div>'
-            f'<div class="tags" title="1-hour SuperTrend"><span class="sm">1H</span>{_tf_tag(info.get("tf1h"))}</div>'
             f'<div class="tags">{_gc_tag(info, short=True)}</div></div>')
 
     # ── live: today's signals + confirmations
@@ -1525,15 +1505,6 @@ def write_dashboard(state):
         mv, _ = outcome({**s, "open": True}, _current_price(state, s["name"]))
         return mv
 
-    def live_gates(name, label, rec=None):
-        """Gate flags recorded with a live alert, else today's HTF trends."""
-        if rec and "gh" in rec:
-            return (bool(rec["gh"]),)
-        info = state.get(name) or state.get(INDEX_STATE_PREFIX + name) or {}
-        want = -1 if "SELL" in label else 1
-        return (info.get("tf1h") == want,)
-
-    n_gated = sum(1 for s in today if all(live_gates(s["name"], s["label"], s)))
     n_golden = sum(v.get("gc") == 1 for v in stocks.values())
     n_death = sum(v.get("gc") == -1 for v in stocks.values())
     n_fresh = sum(1 for v in stocks.values() if v.get("gc") in (1, -1)
@@ -1541,7 +1512,7 @@ def write_dashboard(state):
     kpis = (
         f'<div class="panel kpi"><div class="k">Signals {"today" if latest_day else ""}</div>'
         f'<div class="v">{len(today)}</div><div class="s"><span class="up">{n_buy} buy</span> · '
-        f'<span class="dn">{len(today) - n_buy} sell</span> · <b>{n_gated}</b> pass the 1H gate</div>'
+        f'<span class="dn">{len(today) - n_buy} sell</span></div>'
         f'{split(n_buy, len(today) - n_buy)}</div>'
         f'<div class="panel kpi"><div class="k">Double confirmations</div><div class="v">{len(conf_today)}</div>'
         f'<div class="s"><span class="up">{sum(c["dir"] == "buy" for c in conf_today)} buy</span> · '
@@ -1564,7 +1535,7 @@ def write_dashboard(state):
 
     conf_rows = "".join(
         f'<tr data-sym="{e(c["name"])}"><td>{_tv(c["name"])}</td>'
-        f'<td>{_tag("CONFIRMED " + c["dir"].upper())}</td><td>{_gate_tags(*live_gates(c["name"], c["dir"].upper()))}</td>'
+        f'<td>{_tag("CONFIRMED " + c["dir"].upper())}</td>'
         f'<td>{_tag(c["st"]["label"])} <span class="mu">{e(fmt_time(c["st"]["time"]))}</span></td>'
         f'<td>{_tag(c["adx"]["label"])} <span class="mu">{e(fmt_time(c["adx"]["time"]))}</span></td>'
         f'<td class="r">{_fmt_price(c["price"])}</td><td class="r">{_fmt_price(_current_price(state, c["name"]))}</td>'
@@ -1573,10 +1544,8 @@ def write_dashboard(state):
         for c in conf_today)
     live_rows = "".join(
         f'<tr data-sym="{e(s["name"])}" data-dir="{_direction(s["label"])}" '
-        f'data-gate="{"both" if all(live_gates(s["name"], s["label"], s)) else "no"}"'
         f'{" class=fresh" if s["time"] == scan_time else ""}>'
         f'<td class="mu">{e(fmt_time(s["time"]))}</td><td>{_tv(s["name"])}</td><td>{_tag(s["label"])}</td>'
-        f'<td>{_gate_tags(*live_gates(s["name"], s["label"], s))}</td>'
         f'<td class="mu hide-sm">{_strat_name(s["strategy"])}</td><td class="r">{_fmt_price(s["price"])}</td>'
         f'<td class="r">{_pct(now_move(s))}</td>'
         f'{excursion_cells(_match_replay(archive, s["name"], (s["strategy"],), _direction(s["label"]), s["time"][:10], s["time"]))}</tr>'
@@ -1683,13 +1652,13 @@ def write_dashboard(state):
             f'<tr data-sym="{e(sym)}" data-sector="{e(sector)}" data-stale="{int(sym in stale)}" '
             f'data-st="{st}" data-adx="{adx}" data-dist="{dist if dist is not None else 999}" '
             f'data-chg="{chg if chg is not None else 0}" data-px="{info.get("last_close") or 0}" '
-            f'data-mv="{mv if mv is not None else -999}" data-tf1h="{info.get("tf1h", 0)}" '
+            f'data-mv="{mv if mv is not None else -999}" '
             f'data-gc="{info.get("gc", 0)}" data-gcd="{info.get("gc_days", 999) if info.get("gc") else 999}" '
             f'data-gck="{info.get("gc", 0) * 10000 - (info.get("gc_days") or 0)}"'
             f'{" class=fresh" if sym in fresh else ""}>'
             f'<td><button class="star" data-fav="{e(sym)}" aria-label="Favourite">☆</button>{_tv(sym)}{stale_tag}</td>'
             f'<td class="mu hide-md">{e(sector)}</td><td class="r">{_fmt_price(info.get("last_close"))}</td>'
-            f'<td class="r">{_pct(chg)}</td><td>{_st_tag(st)}</td><td>{_tf_tag(info.get("tf1h"))}</td>'
+            f'<td class="r">{_pct(chg)}</td><td>{_st_tag(st)}</td>'
             f'<td>{_adx_tag(adx)}</td><td>{_gc_tag(info)}</td>'
             f'<td class="r">{dist_s}</td>'
             f'<td>{(_tag(ls["label"]) + " " + _pct(mv) + "<div class=sm>" + e(fmt_stamp(ls["time"])) + max_txt + "</div>") if ls else "<span class=fa>—</span>"}</td></tr>')
@@ -1757,13 +1726,12 @@ stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
 <div class="kpis k5">{kpis}</div>
 <section><div class="sh"><h2>Double confirmations</h2><span class="meta">{e(fmt_day(latest_day)) if latest_day else ""}</span></div>
 <p class="note">SuperTrend and ADX DI gave the same signal on the same day — the latest signal of each counts.</p>
-{table("t-conf", '<th>Stock</th><th>Setup</th><th>Gate</th><th>SuperTrend</th><th>ADX DI</th><th class="r">At signal</th><th class="r">Now</th><th class="r">Move</th><th class="r">Max gain</th><th class="r hide-sm">Max drawdown</th>',
+{table("t-conf", '<th>Stock</th><th>Setup</th><th>SuperTrend</th><th>ADX DI</th><th class="r">At signal</th><th class="r">Now</th><th class="r">Move</th><th class="r">Max gain</th><th class="r hide-sm">Max drawdown</th>',
        conf_rows, "No double confirmations today yet.")}</section>
 <section><div class="sh"><h2>Today's signals</h2><div class="tb" style="margin:0">
-<div class="seg" id="f-live-gate"><button class="on" data-f="all">All</button><button data-f="both" title="1-hour trend agrees">Gated (1H)</button></div>
 <div class="seg" id="f-live-dir"><button class="on" data-f="all">All</button>
 <button data-f="buy">Buy</button><button data-f="sell">Sell</button></div></div></div>
-{table("t-live", '<th>Time</th><th>Stock</th><th>Signal</th><th>Gate</th><th class="hide-sm">Strategy</th><th class="r">Price</th><th class="r">Move</th><th class="r">Max gain</th><th class="r hide-sm">Max drawdown</th>',
+{table("t-live", '<th>Time</th><th>Stock</th><th>Signal</th><th class="hide-sm">Strategy</th><th class="r">Price</th><th class="r">Move</th><th class="r">Max gain</th><th class="r hide-sm">Max drawdown</th>',
        live_rows, "No signals yet today — they appear here as each scan finds them.")}</section>
 </div>
 
@@ -1775,33 +1743,26 @@ stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
 <select class="sel" id="f-past-sess" aria-label="Time of day"><option value="">All day</option>
 <option value="09:15-11:00">9:15 – 11 AM</option><option value="11:00-14:00">11 AM – 2 PM</option>
 <option value="14:00-15:30">2 – 3:30 PM</option></select>
-<div class="seg" id="f-past-gate"><button class="on" data-f="all">All</button><button data-f="both" title="1-hour trend agrees">1H gate</button></div>
 <div class="seg" id="f-past-str"><button class="on" data-f="all">Any strength</button><button data-f="strong">Strong</button><button data-f="normal">Not strong</button></div>
 <label class="chk"><input type="checkbox" id="f-past-conf"> Confirmed only</label>
 <label class="chk"><input type="checkbox" id="f-past-fav"> ★ only</label>
 <select class="sel" id="f-past-sym" aria-label="Stock or index">{past_sym_opts}</select></div>
 {"".join(day_sums)}
-{table("t-past", '<th class="sorted desc" data-k="t" data-asc="0">Time</th><th data-k="sym" data-asc="1">Stock</th><th>Signal</th><th>Gate</th><th class="hide-md">Strategy</th><th class="r hide-sm">Price</th><th class="r hide-md">Exit</th><th class="r" data-k="mv" data-asc="0">Move</th><th class="r" data-k="mfe" data-asc="0">Max gain</th><th class="r hide-sm" data-k="mae" data-asc="1">Max drawdown</th><th class="r" data-k="bars" data-asc="1">Bars</th>',
+{table("t-past", '<th class="sorted desc" data-k="t" data-asc="0">Time</th><th data-k="sym" data-asc="1">Stock</th><th>Signal</th><th class="hide-md">Strategy</th><th class="r hide-sm">Price</th><th class="r hide-md">Exit</th><th class="r" data-k="mv" data-asc="0">Move</th><th class="r" data-k="mfe" data-asc="0">Max gain</th><th class="r hide-sm" data-k="mae" data-asc="1">Max drawdown</th><th class="r" data-k="bars" data-asc="1">Bars</th>',
        "", "No signals match these filters.")}
 <p class="note below">Every signal from the last {HISTORY_DAYS} sessions, replayed bar by bar from 15-minute data. Time = the
 15-min candle the signal formed on (labelled by its start, like TradingView); <b>Move</b> = price change in the signal's favour
 up to its flip (or to now if still open); <b>Max gain</b> / <b>Max drawdown</b> = furthest price went in the signal's favour /
 against it before the flip; <b>Bars</b> = 15-min bars until that strategy flipped (SuperTrend reversed / ADX left that side).
-✓ = part of a double confirmation that day. <b>Gate</b>: <b>1H</b> lights up when the 1-hour SuperTrend (last
-candle closed before the signal) points the same way; "1H gate" keeps only those signals.</p>
+✓ = part of a double confirmation that day.</p>
 </div>
 
 <div class="view" id="v-accuracy">
 <div class="sh"><h2>Accuracy tracker</h2><span class="meta" id="acc-span">{e(span)}</span></div>
 <div class="tb"><select class="sel" id="f-acc-sym" aria-label="Stock or index">{sym_opts}</select>
-<div class="seg" id="f-acc-gate"><button class="on" data-f="all">All signals</button><button data-f="both">1H gate</button></div>
 <span class="mu" id="acc-what" style="font-size:12px"></span></div>
 <div class="kpis" id="acc-kpis"></div>
 <div class="kpis k3" id="acc-k3"></div>
-<section><div class="sh"><h2>Stage-gate funnel</h2><span class="meta">how many signals survive each gate, and how they performed</span></div>
-<div class="panel tw"><table><thead><tr><th>Stage</th><th class="r">Signals</th><th class="r">Per session</th><th>Win rate</th>
-<th class="r">Avg move</th><th class="r">Median move</th><th class="r hide-sm">Median max gain</th><th class="r hide-sm">Median max drawdown</th></tr></thead>
-<tbody id="acc-funnel"></tbody></table></div></section>
 <div class="panel tw"><table><thead><tr><th>Signal</th><th class="r">Signals</th><th class="r hide-sm">Closed</th>
 <th>Win rate</th><th class="r">Median bars</th><th class="r">Median move</th><th class="r">Median max gain</th>
 <th class="r">Median max drawdown</th><th class="r hide-sm">Avg move</th>
@@ -1850,20 +1811,20 @@ Ignores brokerage, taxes and slippage.</p>
 <div class="sh"><h2>All stocks</h2><span class="meta" id="c-stocks"></span></div>
 <div class="tb"><input type="search" id="f-stk-q" placeholder="Search stock…" autocomplete="off">
 <select class="sel" id="f-stk-sector" aria-label="Sector">{sector_opts}</select>
-<div class="seg" id="f-stk-view"><button class="on" data-f="all">All</button><button data-f="fav" title="Your starred stocks">★</button><button data-f="mtf" title="15-min and 1-hour SuperTrend point the same way">15m + 1H aligned</button>
+<div class="seg" id="f-stk-view"><button class="on" data-f="all">All</button><button data-f="fav" title="Your starred stocks">★</button>
 <button data-f="golden" title="Daily EMA50 above EMA200">Golden cross</button><button data-f="death" title="Daily EMA50 below EMA200">Death cross</button>
 <button data-f="fresh" title="Golden or death cross in the last 10 sessions">New cross</button><button data-f="aligned" title="SuperTrend and ADX DI point the same way">Aligned</button>
 <button data-f="near" title="Within {WATCHLIST_PCT:g}% of a SuperTrend flip">Near flip</button><button data-f="long">ST long</button>
 <button data-f="short">ST short</button><button data-f="abuy">ADX buy</button><button data-f="asell">ADX sell</button>
 <button data-f="stale" title="Latest candle older than the rest">Stale</button></div></div>
-{table("t-stocks", '<th data-k="sym" data-asc="1">Stock</th><th class="hide-md" data-k="sector" data-asc="1">Sector</th><th class="r" data-k="px" data-asc="0">Price</th><th class="r" data-k="chg" data-asc="0">Day</th><th data-k="st" data-asc="0">SuperTrend</th><th data-k="tf1h" data-asc="0" title="1-hour SuperTrend">1H</th><th data-k="adx" data-asc="0">ADX DI</th><th data-k="gck" data-asc="0" title="Daily EMA50 vs EMA200 — golden / death cross, sessions since">Daily trend</th><th class="r sorted" data-k="dist" data-asc="1">To flip</th><th data-k="mv" data-asc="0">Last signal</th>',
+{table("t-stocks", '<th data-k="sym" data-asc="1">Stock</th><th class="hide-md" data-k="sector" data-asc="1">Sector</th><th class="r" data-k="px" data-asc="0">Price</th><th class="r" data-k="chg" data-asc="0">Day</th><th data-k="st" data-asc="0">SuperTrend</th><th data-k="adx" data-asc="0">ADX DI</th><th data-k="gck" data-asc="0" title="Daily EMA50 vs EMA200 — golden / death cross, sessions since">Daily trend</th><th class="r sorted" data-k="dist" data-asc="1">To flip</th><th data-k="mv" data-asc="0">Last signal</th>',
        "", "No stocks match.", "dist")}
 </div>
 
 <div class="foot">All times IST. Data: Yahoo Finance (~15 min delayed); this page refreshes every 5 minutes.
 Golden / death cross = daily EMA50 above / below EMA200 (the TradingView "EMA 50, 100 and 200" indicator) — a
 trend read, not a trade signal: in backtests (ema_cross_report.md) trading the crosses lagged buy-and-hold.
-SELL signals, the stage gates and the accuracy figures are not from the original backtests. Not investment advice.</div>
+SELL signals and the accuracy figures are not from the original backtests. Not investment advice.</div>
 </main>
 <script>{data_js}</script>
 <script>const STOCKS_GZ="{gz("".join(stock_rows))}";</script>
