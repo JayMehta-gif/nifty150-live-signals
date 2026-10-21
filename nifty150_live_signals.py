@@ -1140,7 +1140,16 @@ function renderPast(){const rows=PAST.filter(r=>r[0].startsWith(pf.day)&&inFocus
   '</td><td class="r hide-md">'+(r[8]?'<span class="fa">open</span>':fp(r[5]))+'</td><td class="r">'+pc(r[6])+'</td><td class="r">'+pc(r[10])+'</td><td class="r hide-sm">'+pc(r[11])+
   '</td><td class="r">'+bt(r[7],r[8])+'</td></tr>').join('')
   ||'<tr><td colspan="11" class="empty">No signals match these filters.</td></tr>';
- PROWS=rows;$('#c-past').textContent=rows.length+' shown';}
+ PROWS=rows;$('#c-past').textContent=rows.length+' shown';pastSummary(rows);}
+/* summary line for exactly the rows shown (follows every filter) */
+function pastSummary(rows){const cl=rows.filter(r=>!r[8]&&r[6]!=null),b=rows.filter(r=>!r[2].includes('SELL')).length;
+ const conf=new Set(rows.filter(r=>r[9]).map(r=>r[0].slice(0,10)+'|'+r[1])).size;
+ const win=cl.length?cl.filter(r=>r[6]>0).length/cl.length*100:null,avg=cl.length?cl.reduce((x,r)=>x+r[6],0)/cl.length:null;
+ const sp=(h)=>'<span>'+h+'</span>';
+ $('#past-sum').innerHTML=rows.length?sp('<b>'+rows.length+'</b> signals')+'<span class="up">'+b+' buy</span><span class="dn">'+(rows.length-b)+' sell</span>'+
+  sp('<b>'+conf+'</b> double confirmations')+(cl.length?sp('median <b>'+num(med(cl.map(r=>r[7])))+'</b> bars to flip')+
+  sp('win rate <b>'+num(win,0,'%')+'</b> ('+cl.length+' closed)')+sp('avg move <b>'+pc(avg)+'</b>')+
+  sp('median max gain <b>'+pc(med(cl.map(r=>r[10]).filter(v=>v!=null)))+'</b> · max drawdown <b>'+pc(med(cl.map(r=>r[11]).filter(v=>v!=null)))+'</b>'):''):''}
 /* Excel download: a CSV (UTF-8 with BOM, so Excel opens it with ₹/× intact) */
 function dlSignals(rows,name){const LF=String.fromCharCode(10),CRLF=String.fromCharCode(13,10),BOM=String.fromCharCode(65279);
  const q=v=>{v=v==null?'':String(v);return v.includes(',')||v.includes('"')||v.includes(LF)?'"'+v.split('"').join('""')+'"':v};
@@ -1158,7 +1167,7 @@ $('#dl-all').onclick=()=>dlSignals(ALLSIG,'all_signals_'+(ALLSIG.length?ALLSIG[A
 $$('#t-past th[data-k]').forEach(th=>th.onclick=()=>{const k=th.dataset.k;pa=k===pk?!pa:th.dataset.asc==='1';pk=k;
  $$('#t-past th').forEach(x=>x.classList.remove('sorted','desc'));th.classList.add('sorted');if(!pa)th.classList.add('desc');renderPast()});
 const daySel=$('#f-past-day');
-daySel.onchange=()=>{pf.day=daySel.value;$$('.daysum').forEach(x=>x.style.display=x.dataset.day===pf.day?'':'none');renderPast()};
+daySel.onchange=()=>{pf.day=daySel.value;renderPast()};
 seg($('#f-past-dir'),v=>{pf.dir=v;renderPast()});seg($('#f-past-strat'),v=>{pf.strat=v;renderPast()});
 $('#f-past-conf').onchange=e=>{pf.conf=e.target.checked;renderPast()};
 $('#f-past-sym').onchange=e=>{pf.sym=e.target.value;renderPast()};
@@ -1167,7 +1176,7 @@ seg($('#f-past-str'),v=>{pf.str=v;renderPast()});
 $('#f-past-fav').onchange=e=>{pf.fav=e.target.checked;renderPast()};
 daySel.onchange();
 /* accuracy: overall or for one stock / index */
-const med=a=>{if(!a.length)return null;const s=[...a].sort((x,y)=>x-y),m=s.length>>1;return s.length%2?s[m]:(s[m-1]+s[m])/2};
+function med(a){if(!a.length)return null;const s=[...a].sort((x,y)=>x-y),m=s.length>>1;return s.length%2?s[m]:(s[m-1]+s[m])/2}
 function stats(rows){const c=[],o=[],b=[],g=[],d=[];for(const r of rows){const m=mvOf(r);if(m==null)continue;
  if(r[7])o.push(m);else{c.push(m);if(r[6]!=null)b.push(r[6]);if(r[8]!=null){g.push(r[8]);d.push(r[9])}}}
  return{n:rows.length,closed:c.length,open:o.length,win:c.length?c.filter(x=>x>0).length/c.length*100:null,bars:med(b),
@@ -1176,7 +1185,7 @@ function stats(rows){const c=[],o=[],b=[],g=[],d=[];for(const r of rows){const m
   open_share:(c.length+o.length)?o.length/(c.length+o.length):0}}
 const kpi=(k,v,s)=>'<div class="panel kpi"><div class="k">'+k+'</div><div class="v">'+v+'</div><div class="s">'+s+'</div></div>';
 const big=v=>v==null?'—':Math.abs(v)<0.005?'<span class="mu">0.00%</span>':'<span class="'+(v>0?'up':'dn')+'">'+(v>0?'+':'')+v.toFixed(2)+'%</span>';
-const num=(v,d=0,suf='')=>v==null?'—':v.toFixed(d)+suf;
+function num(v,d=0,suf=''){return v==null?'—':v.toFixed(d)+suf}
 function accRow(tag,rows){const a=stats(rows);
  const warn=a.open_share>0.3?' <span class="tag mute" title="'+Math.round(a.open_share*100)+'% of these signals are still open. Closed-only figures (win rate, median move) are biased towards quick reversals — use Avg incl. open.">⚠ '+Math.round(a.open_share*100)+'% open</span>':'';
  const win=a.win==null?'<span class="fa">—</span>':'<div class="wr"><span style="min-width:38px">'+a.win.toFixed(0)+
@@ -1744,22 +1753,6 @@ def write_dashboard(state):
                 + (f'<optgroup label="Indices">{ix}</optgroup>' if ix else "")
                 + (f'<optgroup label="Stocks">{st}</optgroup>' if st else ""))
     past_sym_opts = sym_options(past_counts, "All stocks &amp; indices")
-    day_sums = []
-    for d in past_days:
-        ds = [h for h in past if h["time"][:10] == d]
-        b = sum(_direction(h["label"]) == "buy" for h in ds)
-        acc = accuracy_stats(ds, state)
-        parts = [f"<span><b>{len(ds)}</b> signals</span>", f'<span class="up">{b} buy</span>',
-                 f'<span class="dn">{len(ds) - b} sell</span>',
-                 f"<span><b>{sum(1 for k in conf_keys if k[0] == d)}</b> double confirmations</span>"]
-        if acc["bars"] is not None:
-            parts.append(f"<span>median <b>{acc['bars']:.0f}</b> bars to flip</span>")
-        if acc["win"] is not None:
-            parts.append(f"<span>win rate <b>{acc['win']:.0f}%</b> ({acc['closed']} closed)</span>")
-        if acc["mfe"] is not None:
-            parts.append(f"<span>median max gain <b class=up>{acc['mfe']:+.2f}%</b> · "
-                         f"max drawdown <b class=dn>{acc['mae']:+.2f}%</b></span>")
-        day_sums.append(f'<div class="daysum" data-day="{d}">{"".join(parts)}</div>')
 
     # ── accuracy: symbol picker (stats themselves are computed in the browser)
     span = (f"{fmt_day(days_all[-1])} – {fmt_day(days_all[0])} · {len(days_all)} sessions"
@@ -1908,7 +1901,7 @@ stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
 <select class="sel" id="f-past-sym" aria-label="Stock or index">{past_sym_opts}</select>
 <button class="sel dl" id="dl-shown" title="Download the signals shown below (current filters) as a spreadsheet">⬇ Excel (shown)</button>
 <button class="sel dl" id="dl-all" title="Download every signal in the archive as a spreadsheet">⬇ Excel (all signals)</button></div>
-{"".join(day_sums)}
+<div class="daysum" id="past-sum"></div>
 {table("t-past", '<th class="sorted desc" data-k="t" data-asc="0">Time</th><th data-k="sym" data-asc="1">Stock</th><th>Signal</th><th class="hide-md">Strategy</th><th class="r hide-sm">Price</th><th class="r hide-md">Exit</th><th class="r" data-k="mv" data-asc="0">Move</th><th class="r" data-k="mfe" data-asc="0">Max gain</th><th class="r hide-sm" data-k="mae" data-asc="1">Max drawdown</th><th class="r" data-k="bars" data-asc="1">Bars</th>',
        "", "No signals match these filters.")}
 <details class="note below"><summary>How to read this table</summary>Every signal from the last {HISTORY_DAYS} sessions, replayed bar by bar from 15-minute data. Time = the
