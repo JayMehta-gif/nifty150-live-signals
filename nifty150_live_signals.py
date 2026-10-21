@@ -53,8 +53,8 @@ Notes:
     id from https://api.telegram.org/bot<TOKEN>/getUpdates. Verify with:
         python nifty150_live_signals.py --test-telegram
     If neither is configured, Telegram is skipped (popup + console only).
-    Optional: TELEGRAM_MODE = gated (default: only signals whose 1-hour
-    SuperTrend agrees — the stage gate), all, or confirmed (double
+    Optional: TELEGRAM_MODE = all (default: every signal), gated (only
+    signals whose 1-hour SuperTrend agrees — the stage gate), or confirmed (double
     confirmations + index signals); TELEGRAM_UNTIL=HH:MM stops alerts after
     that time. The dashboard always shows every signal, with gate badges.
 
@@ -798,7 +798,7 @@ def format_alert(fired, confirmed=(), html=True):
 STRATEGY_NAMES = {"SuperTrend": "SuperTrend", "ADX_DI": "ADX DI", "EMA_EARLY": "EMA 50×100",
                   "EMA_GOLDEN": "EMA 50×200", "CONFIRMED": "Both"}
 
-TELEGRAM_MODE = os.environ.get("TELEGRAM_MODE", "gated").strip().lower() or "gated"
+TELEGRAM_MODE = os.environ.get("TELEGRAM_MODE", "all").strip().lower() or "all"
 TELEGRAM_UNTIL = os.environ.get("TELEGRAM_UNTIL", "").strip()  # e.g. "14:00": no alerts after that
 # Which names may alert on Telegram: comma-separated, or "all". Default: the NIFTY 50 index only.
 TELEGRAM_SYMBOLS = os.environ.get("TELEGRAM_SYMBOLS", "").strip() or "NIFTY 50"
@@ -806,9 +806,9 @@ TELEGRAM_SYMBOLS = os.environ.get("TELEGRAM_SYMBOLS", "").strip() or "NIFTY 50"
 
 def telegram_filter(fired, confirmed, now=None, gate_flags=None):
     """Apply the Telegram mode (the dashboard always shows everything):
+      all       — every signal + double confirmations (default)
       gated     — only signals whose 1-hour trend agrees, plus double
-                  confirmations that pass the 1-hour gate (default)
-      all       — every signal + double confirmations
+                  confirmations that pass the 1-hour gate
       confirmed — double confirmations + index signals only
     after limiting to TELEGRAM_SYMBOLS (default "NIFTY 50"; "all" = every
     stock and index), and TELEGRAM_UNTIL, a cut-off time after which nothing
@@ -1037,7 +1037,7 @@ function filterer(tbodySel,countSel){const rows=$$(tbodySel+' tr[data-sym]'),f={
 const VIEWS={all:()=>true,golden:d=>d.gc==='1',death:d=>d.gc==='-1',fresh:d=>+d.gcd<=10,fav:d=>FAV.has(d.sym),stale:d=>d.stale==='1',mtf:d=>d.st!=='0'&&d.st===d.tf1h,aligned:d=>(d.st==='1'&&+d.adx>0)||(d.st==='-1'&&+d.adx<0),near:d=>+d.dist<=NEAR,
  long:d=>d.st==='1',short:d=>d.st==='-1',abuy:d=>+d.adx>0,asell:d=>+d.adx<0};
 const live=filterer('#t-live tbody');seg($('#f-live-dir'),v=>live.set('dir',v));
-seg($('#f-live-gate'),v=>live.set('gate',v==='all'?'all':'both'));live.set('gate','both');
+seg($('#f-live-gate'),v=>live.set('gate',v==='all'?'all':'both'));live.set('gate','all');
 /* shared archive (ARCH/NAMES/PX/PDAYS come from the data script).
    ARCH row: [time, name#, label, strategy 0 ST/1 ADX/2 CONFIRMED, price, exit, bars, open, max gain, max drawdown] */
 const SN=['SuperTrend','ADX_DI','CONFIRMED','EMA_EARLY','EMA_GOLDEN'];
@@ -1051,7 +1051,7 @@ const PAST=ARCH.filter(r=>isSig(r)&&PDAYS.has(r[0].slice(0,10))).reverse().map(r
  r[7]?null:r[5],mvOf(r),r[6],r[7],CONF.has(r[0].slice(0,10)+'|'+r[1])?1:0,r[8],r[9],r[12]]);
 const gb=gh=>'<span class="tag '+(gh?'ok':'mute')+'">1H</span>';
 const gateOk=(g,gh)=>g==='all'||!!gh;
-const PT=$('#t-past tbody'),pf={day:'',dir:'all',strat:'all',conf:false,sym:'',sess:'',str:'all',fav:false,gate:'both'};let pk='t',pa=false;
+const PT=$('#t-past tbody'),pf={day:'',dir:'all',strat:'all',conf:false,sym:'',sess:'',str:'all',fav:false,gate:'all'};let pk='t',pa=false;
 const fp=v=>v==null?'—':v.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
 const tg=l=>'<span class="tag '+(l.includes('SELL')?'dn':'up')+'">'+l.replace('_',' ')+'</span>';
 const pc=v=>v==null?'<span class="fa">—</span>':Math.abs(v)<0.005?'<span class="mu">0.00%</span>':
@@ -1760,7 +1760,7 @@ stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
 {table("t-conf", '<th>Stock</th><th>Setup</th><th>Gate</th><th>SuperTrend</th><th>ADX DI</th><th class="r">At signal</th><th class="r">Now</th><th class="r">Move</th><th class="r">Max gain</th><th class="r hide-sm">Max drawdown</th>',
        conf_rows, "No double confirmations today yet.")}</section>
 <section><div class="sh"><h2>Today's signals</h2><div class="tb" style="margin:0">
-<div class="seg" id="f-live-gate"><button data-f="all">All</button><button class="on" data-f="both" title="1-hour trend agrees">Gated (1H)</button></div>
+<div class="seg" id="f-live-gate"><button class="on" data-f="all">All</button><button data-f="both" title="1-hour trend agrees">Gated (1H)</button></div>
 <div class="seg" id="f-live-dir"><button class="on" data-f="all">All</button>
 <button data-f="buy">Buy</button><button data-f="sell">Sell</button></div></div></div>
 {table("t-live", '<th>Time</th><th>Stock</th><th>Signal</th><th>Gate</th><th class="hide-sm">Strategy</th><th class="r">Price</th><th class="r">Move</th><th class="r">Max gain</th><th class="r hide-sm">Max drawdown</th>',
@@ -1775,7 +1775,7 @@ stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
 <select class="sel" id="f-past-sess" aria-label="Time of day"><option value="">All day</option>
 <option value="09:15-11:00">9:15 – 11 AM</option><option value="11:00-14:00">11 AM – 2 PM</option>
 <option value="14:00-15:30">2 – 3:30 PM</option></select>
-<div class="seg" id="f-past-gate"><button data-f="all">All</button><button class="on" data-f="both" title="1-hour trend agrees">1H gate</button></div>
+<div class="seg" id="f-past-gate"><button class="on" data-f="all">All</button><button data-f="both" title="1-hour trend agrees">1H gate</button></div>
 <div class="seg" id="f-past-str"><button class="on" data-f="all">Any strength</button><button data-f="strong">Strong</button><button data-f="normal">Not strong</button></div>
 <label class="chk"><input type="checkbox" id="f-past-conf"> Confirmed only</label>
 <label class="chk"><input type="checkbox" id="f-past-fav"> ★ only</label>
