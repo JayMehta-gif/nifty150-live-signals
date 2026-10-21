@@ -952,6 +952,7 @@ border-radius:9px;background:var(--panel);color:var(--fg);font:inherit;font-size
 .sel{height:32px;padding:0 30px 0 11px;border:1px solid var(--line);border-radius:9px;background:var(--panel);
 color:var(--fg);font:inherit;font-size:13px;font-weight:600;cursor:pointer}
 .sel:focus{outline:2px solid var(--accent);outline-offset:-1px}
+.sel.dl{padding:0 12px;background-image:none;appearance:none}.sel.dl:hover{border-color:var(--accent)}
 .chk{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--muted);
 cursor:pointer;user-select:none}.chk input{accent-color:var(--accent)}
 .daysum{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12px;color:var(--muted);margin:2px 0 10px}
@@ -1057,6 +1058,7 @@ const t12=t=>{let[h,m]=t.slice(11,16).split(':').map(Number);const ap=h>=12?'PM'
 const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const dshort=t=>+t.slice(8,10)+' '+MON[+t.slice(5,7)-1];
 const bt=(b,o)=>b==null?'—':o?(b===0?'<span class="tag ok">new</span>':'<span class="mu">'+b+'+</span>'):b;
+let PROWS=[];
 function renderPast(){const rows=PAST.filter(r=>r[0].startsWith(pf.day)&&(pf.dir==='all'||(pf.dir==='sell')===r[2].includes('SELL'))
  &&(pf.strat==='all'||r[3]===pf.strat)&&(!pf.conf||r[9])&&(!pf.sym||r[1]===pf.sym)&&(!pf.fav||FAV.has(r[1]))
  &&(pf.str==='all'||(pf.str==='strong')===r[2].endsWith('STRONG'))
@@ -1068,7 +1070,21 @@ function renderPast(){const rows=PAST.filter(r=>r[0].startsWith(pf.day)&&(pf.dir
   '</td><td class="r hide-md">'+(r[8]?'<span class="fa">open</span>':fp(r[5]))+'</td><td class="r">'+pc(r[6])+'</td><td class="r">'+pc(r[10])+'</td><td class="r hide-sm">'+pc(r[11])+
   '</td><td class="r">'+bt(r[7],r[8])+'</td></tr>').join('')
   ||'<tr><td colspan="11" class="empty">No signals match these filters.</td></tr>';
- $('#c-past').textContent=rows.length+' shown';}
+ PROWS=rows;$('#c-past').textContent=rows.length+' shown';}
+/* Excel download: a CSV (UTF-8 with BOM, so Excel opens it with ₹/× intact) */
+function dlSignals(rows,name){const LF=String.fromCharCode(10),CRLF=String.fromCharCode(13,10),BOM=String.fromCharCode(65279);
+ const q=v=>{v=v==null?'':String(v);return v.includes(',')||v.includes('"')||v.includes(LF)?'"'+v.split('"').join('""')+'"':v};
+ const n=v=>v==null?'':(Math.abs(v)<0.005?0:+v).toFixed(2);
+ const out=[['Date','Time','Symbol','Signal','Strategy','Entry price','Exit price','Status','Move %','Max gain %','Max drawdown %','Bars to flip','Double confirmation day']];
+ for(const r of rows)out.push([r[0].slice(0,10),t12(r[0]),r[1],r[2].replace('_',' '),SNAME[r[3]],n(r[4]),r[8]?'':n(r[5]),r[8]?'Open':'Closed',
+  n(r[6]),n(r[10]),n(r[11]),r[7]??'',r[9]?'Yes':'No']);
+ const blob=new Blob([BOM+out.map(x=>x.map(q).join(',')).join(CRLF)],{type:'text/csv;charset=utf-8'});
+ const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();
+ setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},500)}
+const ALLSIG=ARCH.filter(r=>isSig(r)).map(r=>[r[0],NAMES[r[1]],r[2],SN[r[3]],r[4],r[7]?null:r[5],mvOf(r),r[6],r[7],
+ CONF.has(r[0].slice(0,10)+'|'+r[1])?1:0,r[8],r[9]]).sort((a,b)=>b[0].localeCompare(a[0]));
+$('#dl-shown').onclick=()=>dlSignals(PROWS,'signals_'+(pf.day||'all-days')+'.csv');
+$('#dl-all').onclick=()=>dlSignals(ALLSIG,'all_signals_'+(ALLSIG.length?ALLSIG[ALLSIG.length-1][0].slice(0,10)+'_to_'+ALLSIG[0][0].slice(0,10):'none')+'.csv');
 $$('#t-past th[data-k]').forEach(th=>th.onclick=()=>{const k=th.dataset.k;pa=k===pk?!pa:th.dataset.asc==='1';pk=k;
  $$('#t-past th').forEach(x=>x.classList.remove('sorted','desc'));th.classList.add('sorted');if(!pa)th.classList.add('desc');renderPast()});
 const daySel=$('#f-past-day');
@@ -1746,7 +1762,9 @@ stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
 <div class="seg" id="f-past-str"><button class="on" data-f="all">Any strength</button><button data-f="strong">Strong</button><button data-f="normal">Not strong</button></div>
 <label class="chk"><input type="checkbox" id="f-past-conf"> Confirmed only</label>
 <label class="chk"><input type="checkbox" id="f-past-fav"> ★ only</label>
-<select class="sel" id="f-past-sym" aria-label="Stock or index">{past_sym_opts}</select></div>
+<select class="sel" id="f-past-sym" aria-label="Stock or index">{past_sym_opts}</select>
+<button class="sel dl" id="dl-shown" title="Download the signals shown below (current filters) as a spreadsheet">⬇ Excel (shown)</button>
+<button class="sel dl" id="dl-all" title="Download every signal in the archive as a spreadsheet">⬇ Excel (all signals)</button></div>
 {"".join(day_sums)}
 {table("t-past", '<th class="sorted desc" data-k="t" data-asc="0">Time</th><th data-k="sym" data-asc="1">Stock</th><th>Signal</th><th class="hide-md">Strategy</th><th class="r hide-sm">Price</th><th class="r hide-md">Exit</th><th class="r" data-k="mv" data-asc="0">Move</th><th class="r" data-k="mfe" data-asc="0">Max gain</th><th class="r hide-sm" data-k="mae" data-asc="1">Max drawdown</th><th class="r" data-k="bars" data-asc="1">Bars</th>',
        "", "No signals match these filters.")}
