@@ -2094,7 +2094,7 @@ def evaluate(name, df, prev, htf=None):
                  "day_chg_pct": day_chg_pct, "name": name,
                  "tf1h": htf_at(htf, "1h", df.index[-1] + pd.Timedelta(minutes=15)),
                  "history": bar_signals(name, df, c, trend, condition, htf),
-                 "history_from": str(df.index[np.isin(dates, sorted(set(dates))[-REPLAY_DAYS:])][0])}
+                 "history_from": str(df.index[np.isin(dates, _replay_days(dates))][0])}
     return new_state, fired
 
 
@@ -2102,7 +2102,16 @@ HISTORY_DAYS = 10        # trading days selectable in the dashboard's "Past sign
 SIM_LEVELS = (0.5, 1.0, 1.5, 2.0, 3.0)  # % targets / stops the exit simulator can test
 REPLAY_DAYS = 10         # trading days replayed per scan (of the ~15 fetched; the rest is warm-up)
 ARCHIVE_KEY = "__ARCHIVE__"
-ARCHIVE_KEEP_DAYS = 30   # calendar days of replayed signals kept for the accuracy tracker
+ARCHIVE_KEEP_DAYS = 120  # calendar days of replayed signals kept for the accuracy tracker (~80 sessions)
+BACKFILL_PERIOD = "60d"  # --backfill: Yahoo's limit for 15-min history
+BACKFILL_WARMUP = 3      # sessions at the start of the backfill used only to settle the indicators
+
+
+def _replay_days(dates):
+    """The trading days to replay: the last REPLAY_DAYS, always leaving the
+    first BACKFILL_WARMUP sessions of the data to settle the indicators."""
+    days = sorted(set(dates))
+    return days[-min(REPLAY_DAYS, max(len(days) - BACKFILL_WARMUP, 1)):]
 
 
 def bar_signals(name, df, close, trend, condition, htf=None):
@@ -2177,7 +2186,7 @@ def bar_signals(name, df, close, trend, condition, htf=None):
                 "hf": hf, "ha": ha, **gates(i, buy), "_i": int(i), "_end": int(end)}
 
     dates = df.index.date
-    days = sorted(set(dates))[-REPLAY_DAYS:]
+    days = _replay_days(dates)
     out = []
     for i in np.nonzero(np.isin(dates, days))[0]:
         if i == 0:
@@ -2249,13 +2258,13 @@ def build_scan_order(universe, state):
     return [s for _, s in watchlist], rest
 
 
-def scan_indices(state):
+def scan_indices(state, backfill=False):
     """Same strategies on the index series themselves (see INDEX_TICKERS)."""
     fired = []
     for name, yf_ticker in INDEX_TICKERS.items():
         key = INDEX_STATE_PREFIX + name
         try:
-            df = fetch_15m(name, yf_ticker)
+            df = _download(name, yf_ticker, BACKFILL_PERIOD) if backfill else fetch_15m(name, yf_ticker)
             if df is None or len(df) < 60:
                 continue
             prev = state.get(key, {})
@@ -2269,7 +2278,7 @@ def scan_indices(state):
     return fired
 
 
-def scan_once(per_symbol_delay=None):
+def scan_once(per_symbol_delay=None, backfill=False):
     """Scan the universe with requests paced across the poll window, so the
     150-symbol sweep never bursts. Symbols sitting close to a SuperTrend flip
     (per last cycle's distance_pct) are scanned first so a live flip is picked
@@ -2297,7 +2306,7 @@ def scan_once(per_symbol_delay=None):
 
     for idx, symbol in enumerate(scan_order):
         try:
-            df = fetch_15m(symbol)
+            df = _download(symbol, f"{symbol}.NS", BACKFILL_PERIOD) if backfill else fetch_15m(symbol)
             consecutive_rate_limits = 0
 
             if df is None or len(df) < 60:
@@ -2327,7 +2336,7 @@ def scan_once(per_symbol_delay=None):
             delay = watch_delay if idx < len(watchlist) else rest_delay
             time.sleep(delay * random.uniform(0.7, 1.3))
 
-    fired.extend(scan_indices(state))
+    fired.extend(scan_indices(state, backfill))
     try:
         update_momentum(state, universe)
     except Exception as e:  # noqa: BLE001 — never let the paper tracker break alerts
@@ -2358,6 +2367,9 @@ def scan_once(per_symbol_delay=None):
     confirmed = [(c["name"], c["dir"], c["price"])
                  for c in find_confluence(state[SIGNAL_LOG_KEY]).get(now_str[:10], [])
                  if c["time"] == now_str]
+    if backfill:
+        print("[backfill] archive now spans", len({h["time"][:10] for h in state.get(ARCHIVE_KEY, [])}), "sessions; no alerts sent")
+        return
     notify_signals(fired, confirmed, gate_flags)
 
 
@@ -2445,6 +2457,15 @@ if __name__ == "__main__":
             time.sleep(float(os.environ.get("SCAN_PACE_SECONDS", ONCE_PACE_SECONDS)))
         save_bars_cache()
         print(f"[warm] cached {len(names)} symbols in {time.time() - t0:.0f}s")
+        sys.exit(0)
+    if "--backfill" in sys.argv:
+        # One-off: download Yahoo's full 60 days of 15-min bars and replay every
+        # session (bar the first few, which only warm up the indicators) into the
+        # archive, so the Accuracy tab starts with ~40 sessions instead of 10.
+        # Later scans keep replaying the last REPLAY_DAYS and the archive keeps
+        # ARCHIVE_KEEP_DAYS. Also rewrites the dashboard; sends no alerts.
+        REPLAY_DAYS = 60
+        scan_once(float(os.environ.get("SCAN_PACE_SECONDS", ONCE_PACE_SECONDS)), backfill=True)
         sys.exit(0)
     if "--test" in sys.argv:
         print("[--test] Ignoring market-hours gate, running one scan against latest available bars.")

@@ -21,6 +21,10 @@ on:
         description: "Run a full scan now, even outside market hours (refreshes the dashboard)"
         type: boolean
         default: false
+      backfill:
+        description: "Backfill the accuracy history to ~40 sessions (one-off, ~10 min; no alerts)"
+        type: boolean
+        default: false
 
 concurrency:
   group: live-signals
@@ -65,7 +69,7 @@ jobs:
           TELEGRAM_UNTIL: ${{ vars.TELEGRAM_UNTIL }}
           # TELEGRAM_SYMBOLS = NIFTY 50 (default) | comma-separated names | all
           TELEGRAM_SYMBOLS: ${{ vars.TELEGRAM_SYMBOLS }}
-        run: python -u nifty150_live_signals.py ${{ github.event.schedule == '0 3 * * 1-5' && '--warm' || (inputs.test_telegram && '--test-telegram' || (inputs.full_scan && '--test' || '--once')) }}
+        run: python -u nifty150_live_signals.py ${{ github.event.schedule == '0 3 * * 1-5' && '--warm' || (inputs.test_telegram && '--test-telegram' || (inputs.backfill && '--backfill' || (inputs.full_scan && '--test' || '--once'))) }}
 
       # The scan (or, outside market hours, the last saved state) writes
       # dashboard.html. It is published to GitHub Pages only in encrypted form
