@@ -201,6 +201,9 @@ NSE_INDEX_URLS = {
     "Nifty500": ("https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv", 500),
 }
 UNIVERSE_FALLBACK = Path(__file__).parent / "nifty500_list.csv"   # saved copy of the NSE list
+NIFTY100_URL = "https://nsearchives.nseindia.com/content/indices/ind_nifty100list.csv"
+NIFTY100_FALLBACK = Path(__file__).parent / "nifty100_list.csv"
+FOCUS_FROM, FOCUS_TO = "09:45", "14:30"   # Focus filter: signal candles from 9:45 AM to before 2:30 PM
 
 # The indices themselves, scanned with the same strategies after the stocks.
 INDEX_TICKERS = {
@@ -214,6 +217,24 @@ INDEX_TICKERS = {
 
 
 SECTORS = {}  # symbol -> NSE industry, filled by load_universe()
+
+
+def load_nifty100():
+    """Nifty 100 constituents (live from NSE, else the saved copy) — the
+    dashboard's Focus filter shows only these stocks plus the indices."""
+    from io import StringIO
+    try:
+        text = (SESSION.get(NIFTY100_URL, timeout=15).text if SESSION else
+                urllib.request.urlopen(urllib.request.Request(NIFTY100_URL, headers={"User-Agent": "Mozilla/5.0"}),
+                                       timeout=15).read().decode())
+        got = sorted(pd.read_csv(StringIO(text))["Symbol"].str.strip())
+        if abs(len(got) - 100) <= 5:
+            return got
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] Nifty 100 list fetch failed ({e}); using the saved copy")
+    if NIFTY100_FALLBACK.exists():
+        return sorted(pd.read_csv(NIFTY100_FALLBACK)["Symbol"].str.strip())
+    return []
 
 
 def load_universe():
@@ -464,6 +485,7 @@ def htf_trends(symbol, yf_ticker, df15):
 
 DAILY_HISTORY = "5y"  # daily candles behind the golden-cross trend (long, so EMA200 has settled)
 FRESH_CROSS_DAYS = 10
+DAILY_CROSS_DAYS = 10   # sessions of daily EMA crosses listed on the Live tab
 
 
 def daily_history(symbol, yf_ticker):
@@ -506,8 +528,42 @@ def daily_ema_trend(symbol, yf_ticker, df15):
 
     gc, gc_date, gc_days = last_cross(e50, e200)
     ec, ec_date, ec_days = last_cross(e50, e100)
+    # Every daily cross since EMA200 settled (first 200 sessions skipped):
+    # dx = the last DAILY_CROSS_DAYS sessions' crosses for the dashboard / alerts
+    # ("f" = formed on today's still-open candle, so not final until 3:30 PM);
+    # dxs = [kind 0 = 50×100 / 1 = 50×200, dir, % move in its favour until the
+    # opposite cross (or to now), sessions held, still open] for the 5-year record.
+    px = c.to_numpy()
+    now = datetime.now(IST)
+    last_open = last_day == now.date() and now.strftime("%H:%M") < "15:30"   # today's daily candle not closed yet
+    dx, dxs = [], []
+    for kind, slow in ((0, e100), (1, e200)):
+        side = np.sign(e50 - slow)
+        flips = [k for k in np.nonzero(side[1:] != side[:-1])[0] + 1 if k >= 200 and side[k] != 0]
+        for j, k in enumerate(flips):
+            d = int(side[k])
+            end = flips[j + 1] if j + 1 < len(flips) else len(px) - 1
+            mv = (px[end] / px[k] - 1) * 100 * d
+            dxs.append([kind, d, round(float(mv), 2), int(end - k), int(j + 1 == len(flips))])
+            if k >= len(px) - DAILY_CROSS_DAYS:
+                dx.append({"k": "EMA_EARLY" if kind == 0 else "EMA_GOLDEN", "d": d, "date": str(days[k]),
+                           "px": round(float(px[k]), 2), "f": int(k == len(px) - 1 and last_open)})
     return {"gc": gc, "gc_date": gc_date, "gc_days": gc_days, "ec": ec, "ec_date": ec_date,
-            "ec_days": ec_days, "ema200_dist": round(float((c.iloc[-1] / e200[-1] - 1) * 100), 2)}
+            "ec_days": ec_days, "ema200_dist": round(float((c.iloc[-1] / e200[-1] - 1) * 100), 2),
+            "dx": dx, "dxs": dxs}
+
+
+def daily_cross_alerts(name, prev, cur):
+    """Alerts for daily EMA crosses that became final (the candle closed) since
+    the last scan. The first time a symbol is seen nothing fires — only the
+    newest cross date is remembered — so old crosses never alert."""
+    done = [x for x in cur.get("dx", []) if not x["f"]]
+    newest = max((x["date"] for x in done), default=prev.get("dx_seen", ""))
+    seen = prev.get("dx_seen")
+    cur["dx_seen"] = max(newest, seen or "")
+    if seen is None:
+        return []
+    return [(x["k"], name, "BUY" if x["d"] == 1 else "SELL", x["px"], x["date"]) for x in done if x["date"] > seen]
 
 
 MOM_KEY = "__MOMENTUM__"
@@ -795,8 +851,8 @@ def format_alert(fired, confirmed=(), html=True):
     return "\n\n".join(sections)
 
 
-STRATEGY_NAMES = {"SuperTrend": "SuperTrend", "ADX_DI": "ADX DI", "EMA_EARLY": "EMA 50×100",
-                  "EMA_GOLDEN": "EMA 50×200", "CONFIRMED": "Both"}
+STRATEGY_NAMES = {"SuperTrend": "SuperTrend", "ADX_DI": "ADX DI", "EMA_EARLY": "EMA 50×100 (daily)",
+                  "EMA_GOLDEN": "EMA 50×200 (daily)", "CONFIRMED": "Both"}
 
 TELEGRAM_MODE = os.environ.get("TELEGRAM_MODE", "all").strip().lower() or "all"
 TELEGRAM_UNTIL = os.environ.get("TELEGRAM_UNTIL", "").strip()  # e.g. "14:00": no alerts after that
@@ -914,6 +970,15 @@ section{margin-bottom:26px}
 .sh h2{font-size:15px;margin:0;letter-spacing:-.01em}.sh .meta{font-size:12px;color:var(--muted)}
 .note{font-size:12px;color:var(--muted);margin:-4px 0 12px;max-width:820px}
 .note.below{margin:14px 0 0;max-width:1100px;line-height:1.6}
+details.note>summary{cursor:pointer;font-weight:600;width:max-content;max-width:100%}
+details.note[open]>summary{margin-bottom:4px}
+details.more{margin-top:26px}
+details.more>summary{cursor:pointer;font-size:14px;font-weight:700;padding:11px 14px;border:1px solid var(--line);
+border-radius:10px;background:var(--panel)}
+details.more[open]>summary{margin-bottom:4px}
+.fbtn{height:30px;padding:0 12px;border-radius:999px;border:1px solid var(--line);background:var(--panel);color:var(--muted);
+font:inherit;font-size:12px;font-weight:700;cursor:pointer}
+.fbtn.on{border-color:var(--accent);color:var(--accent)}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow)}
 /* index strip */
 .idx{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:22px}
@@ -1031,17 +1096,22 @@ function filterer(tbodySel,countSel){const rows=$$(tbodySel+' tr[data-sym]'),f={
  const run=()=>{let n=0;for(const r of rows){const d=r.dataset;let ok=true;
   for(const[k,v]of Object.entries(f)){if(v===''||v==='all')continue;
    if(k==='q'){if(!d.sym.includes(v))ok=false}else if(k==='conf'){if(v&&d.conf!=='1')ok=false}
+   else if(k==='focus'){ok=ok&&inFocus(d.sym,d.t||'12:00')}
    else if(k==='view'){ok=ok&&VIEWS[v](d)}else if(d[k]!==v)ok=false}
   r.style.display=ok?'':'none';n+=ok}
   if(countSel)$(countSel).textContent=n+' shown';const e=$(tbodySel+' .nores');if(e)e.style.display=n?'none':'';};
  return {set(k,v){f[k]=v;run()},run}}
-const VIEWS={all:()=>true,golden:d=>d.gc==='1',death:d=>d.gc==='-1',fresh:d=>+d.gcd<=10,fav:d=>FAV.has(d.sym),stale:d=>d.stale==='1',aligned:d=>(d.st==='1'&&+d.adx>0)||(d.st==='-1'&&+d.adx<0),near:d=>+d.dist<=NEAR,
+const VIEWS={all:()=>true,today:d=>d.today==='1'||FAV.has(d.sym),golden:d=>d.gc==='1',death:d=>d.gc==='-1',fresh:d=>+d.gcd<=10,fav:d=>FAV.has(d.sym),stale:d=>d.stale==='1',aligned:d=>(d.st==='1'&&+d.adx>0)||(d.st==='-1'&&+d.adx<0),near:d=>+d.dist<=NEAR,
  long:d=>d.st==='1',short:d=>d.st==='-1',abuy:d=>+d.adx>0,asell:d=>+d.adx<0};
-const live=filterer('#t-live tbody');seg($('#f-live-dir'),v=>live.set('dir',v));
+/* Focus: Nifty 100 stocks + indices, signal candles 9:45 AM – 2:30 PM (switch in the header) */
+let FOCUS=true;try{FOCUS=localStorage.getItem('focus')!=='0'}catch(e){}
+const inFocus=(n,t)=>!FOCUS||(N100.has(n)&&t>=FOCUS_WIN[0]&&t<FOCUS_WIN[1]);
+const live=filterer('#t-live tbody','#c-live'),conf=filterer('#t-conf tbody','#c-conf'),dxf=filterer('#t-dx tbody','#c-dx');
+seg($('#f-live-dir'),v=>live.set('dir',v));
 /* shared archive (ARCH/NAMES/PX/PDAYS come from the data script).
    ARCH row: [time, name#, label, strategy 0 ST/1 ADX/2 CONFIRMED, price, exit, bars, open, max gain, max drawdown] */
-const SN=['SuperTrend','ADX_DI','CONFIRMED','EMA_EARLY','EMA_GOLDEN'];
-const SNAME={SuperTrend:'SuperTrend',ADX_DI:'ADX DI',CONFIRMED:'Both',EMA_EARLY:'EMA 50×100',EMA_GOLDEN:'EMA 50×200'};
+const SN=['SuperTrend','ADX_DI','CONFIRMED'];
+const SNAME={SuperTrend:'SuperTrend',ADX_DI:'ADX DI',CONFIRMED:'Both'};
 const isSig=r=>r[3]!==2;
 const CONF=new Set(ARCH.filter(r=>r[3]===2).map(r=>r[0].slice(0,10)+'|'+r[1]));
 const mvOf=r=>{const px=r[7]?PX[r[1]]:r[5];if(!px||!r[4])return null;const m=(px/r[4]-1)*100;return r[2].includes('SELL')?-m:m};
@@ -1059,7 +1129,7 @@ const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','De
 const dshort=t=>+t.slice(8,10)+' '+MON[+t.slice(5,7)-1];
 const bt=(b,o)=>b==null?'—':o?(b===0?'<span class="tag ok">new</span>':'<span class="mu">'+b+'+</span>'):b;
 let PROWS=[];
-function renderPast(){const rows=PAST.filter(r=>r[0].startsWith(pf.day)&&(pf.dir==='all'||(pf.dir==='sell')===r[2].includes('SELL'))
+function renderPast(){const rows=PAST.filter(r=>r[0].startsWith(pf.day)&&inFocus(r[1],r[0].slice(11,16))&&(pf.dir==='all'||(pf.dir==='sell')===r[2].includes('SELL'))
  &&(pf.strat==='all'||r[3]===pf.strat)&&(!pf.conf||r[9])&&(!pf.sym||r[1]===pf.sym)&&(!pf.fav||FAV.has(r[1]))
  &&(pf.str==='all'||(pf.str==='strong')===r[2].endsWith('STRONG'))
  &&(!pf.sess||(r[0].slice(11,16)>=pf.sess.slice(0,5)&&r[0].slice(11,16)<pf.sess.slice(6))));
@@ -1114,12 +1184,12 @@ function accRow(tag,rows){const a=stats(rows);
  return '<tr><td>'+tg(tag)+'</td><td class="r">'+a.n+'</td><td class="r hide-sm">'+a.closed+'</td><td>'+win+'</td><td class="r">'+
   num(a.bars)+'</td><td class="r">'+pc(a.move)+'</td><td class="r">'+pc(a.mfe)+'</td><td class="r">'+pc(a.mae)+
   '</td><td class="r hide-sm">'+pc(a.avg)+'</td><td class="r"><b>'+pc(a.all_avg)+'</b></td><td class="r hide-sm">'+a.open+' · '+pc(a.open_move)+warn+'</td></tr>'}
-function renderAcc(sym){const ni=sym?NAMES.indexOf(sym):-1;const scoped=sym?ARCH.filter(r=>r[1]===ni):ARCH;
- const rows=scoped;
+function renderAcc(sym){const ni=sym?NAMES.indexOf(sym):-1;
+ const rows=ARCH.filter(r=>(!sym||r[1]===ni)&&inFocus(NAMES[r[1]],r[0].slice(11,16)));
  const sig=rows.filter(r=>isSig(r)),cf=rows.filter(r=>r[3]===2),all=stats(sig),con=stats(cf);
  const days=[...new Set(sig.map(r=>r[0].slice(0,10)))].sort();
  $('#acc-span').textContent=days.length?dshort(days[0])+' – '+dshort(days[days.length-1])+' · '+days.length+' sessions':'no signals';
- $('#acc-what').textContent=(sym?'Accuracy for '+sym+' only':'All '+NAMES.length+' stocks & indices');
+ $('#acc-what').textContent=(sym?'Accuracy for '+sym+' only':FOCUS?'Focus: Nifty 100 + indices, 9:45 AM – 2:30 PM':'All '+NAMES.length+' stocks & indices, all day');
  $('#acc-kpis').innerHTML=kpi('Signals tracked',all.n,all.closed+' closed · '+all.open+' open')+
   kpi('Win rate (closed)',num(all.win,0,'%'),'moved in the signal’s favour by its flip')+
   kpi('Median bars to flip',num(all.bars),'≈ '+(all.bars==null?'—':(all.bars*15/60).toFixed(1)+' h')+' of trading')+
@@ -1127,13 +1197,11 @@ function renderAcc(sym){const ni=sym?NAMES.indexOf(sym):-1;const scoped=sym?ARCH
  $('#acc-k3').innerHTML=[['Median move at flip','move','where price was when the strategy flipped'],
   ['Median max gain','mfe','furthest in the signal’s favour before the flip'],
   ['Median max drawdown','mae','furthest against the signal before the flip']].map(([t,k,h])=>kpi(t,big(all[k]),h+' · confirmed '+pc(con[k]))).join('');
- const st=sig.filter(r=>r[3]===0),ad=sig.filter(r=>r[3]===1),ee=sig.filter(r=>r[3]===3),eg=sig.filter(r=>r[3]===4),
+ const st=sig.filter(r=>r[3]===0),ad=sig.filter(r=>r[3]===1),
   L=(a,l)=>a.filter(r=>r[2]===l),grp=t=>'<tr class="grp"><td colspan="11">'+t+'</td></tr>';
  $('#acc-body').innerHTML=grp('SuperTrend')+accRow('BUY',L(st,'BUY'))+accRow('SELL',L(st,'SELL'))+accRow('ALL',st)+
   grp('ADX DI')+accRow('BUY',L(ad,'BUY'))+accRow('BUY_STRONG',L(ad,'BUY_STRONG'))+accRow('SELL',L(ad,'SELL'))+
   accRow('SELL_STRONG',L(ad,'SELL_STRONG'))+accRow('ALL',ad)+
-  grp('EMA 50×100 — Early Cross (exit on the opposite cross)')+accRow('BUY',L(ee,'BUY'))+accRow('SELL',L(ee,'SELL'))+accRow('ALL',ee)+
-  grp('EMA 50×200 — Golden / Death Cross (exit on the opposite cross)')+accRow('BUY',L(eg,'BUY'))+accRow('SELL',L(eg,'SELL'))+accRow('ALL',eg)+
   grp('Double confirmation — SuperTrend + ADX DI (enter on 2nd signal, exit on 1st flip)')+
   accRow('CONFIRMED BUY',L(cf,'BUY'))+accRow('CONFIRMED SELL',L(cf,'SELL'));
  accRows=rows;renderSim(rows);renderHours(sig);$('#lb-wrap').style.display=sym?'none':'';if(!sym)renderLeaders(sig);
@@ -1164,8 +1232,7 @@ function simRow(label,rows,ti,si){let res=[],t=0,st=0,f=0;const base=[];
 function renderSim(rows){const ti=+simT.value,si=+simS.value,sig=rows.filter(r=>isSig(r));
  $('#sim-note').textContent=ti<0&&si<0?'No target or stop: every trade exits at the flip (same as the table above).':'';
  $('#sim-body').innerHTML=simRow('All signals',sig,ti,si)+simRow('SuperTrend',sig.filter(r=>r[3]===0),ti,si)+
-  simRow('ADX DI',sig.filter(r=>r[3]===1),ti,si)+simRow('EMA 50×100',sig.filter(r=>r[3]===3),ti,si)+
-  simRow('EMA 50×200',sig.filter(r=>r[3]===4),ti,si)+simRow('Double confirmation',rows.filter(r=>r[3]===2),ti,si);
+  simRow('ADX DI',sig.filter(r=>r[3]===1),ti,si)+simRow('Double confirmation',rows.filter(r=>r[3]===2),ti,si);
  renderEquity(sig,ti,si)}
 function renderEquity(sig,ti,si){const closed=sig.filter(r=>!r[7]).sort((a,b)=>a[0]<b[0]?-1:1);
  const base=[],rule=[];let a=0,b=0;for(const r of closed){const m=mvOf(r);if(m==null)continue;a+=m;base.push(a);
@@ -1196,12 +1263,20 @@ const accSel=$('#f-acc-sym');
 accSel.onchange=()=>{renderAcc(accSel.value);try{localStorage.setItem('accsym',accSel.value)}catch(e){}};
 try{const v=localStorage.getItem('accsym');if(v&&[...accSel.options].some(o=>o.value===v))accSel.value=v}catch(e){}
 renderAcc(accSel.value);
-const stk=filterer('#t-stocks tbody','#c-stocks');seg($('#f-stk-view'),v=>stk.set('view',v));
+const stk=filterer('#t-stocks tbody','#c-stocks');seg($('#f-stk-view'),v=>stk.set('view',v));stk.set('view','today');
 const secSel=$('#f-stk-sector');secSel.onchange=()=>{stk.set('sector',secSel.value);
  $$('tr.secrow').forEach(r=>r.classList.toggle('on',r.dataset.sec===secSel.value))};
 $$('tr.secrow').forEach(r=>r.onclick=()=>{secSel.value=secSel.value===r.dataset.sec?'':r.dataset.sec;secSel.onchange();
  $('#f-stk-q').scrollIntoView({behavior:'smooth',block:'center'})});
 paintStars();
+/* Focus switch: re-filter every view */
+const fb=$('#focus');
+function applyFocus(){fb.classList.toggle('on',FOCUS);fb.textContent=FOCUS?'Focus':'All signals';
+ for(const f of[live,conf,dxf])f.set('focus',FOCUS?'1':'');
+ $('#dx-n100').style.display=FOCUS?'':'none';$('#dx-all').style.display=FOCUS?'none':'';
+ renderPast();renderAcc(accSel.value)}
+fb.onclick=()=>{FOCUS=!FOCUS;try{localStorage.setItem('focus',FOCUS?'1':'0')}catch(e){}applyFocus()};
+applyFocus();
 $('#f-stk-q').oninput=e=>stk.set('q',e.target.value.trim().toUpperCase());stk.run();
 /* sortable tables */
 $$('table[data-sort]').forEach(tbl=>{const tb=$('tbody',tbl);let key=tbl.dataset.sort,asc=true;
@@ -1464,14 +1539,14 @@ def _momentum_view_html(state, sectors):
 <div style="margin-top:12px">{tbl('<th class="r">#</th><th>Stock</th><th class="hide-md">Sector</th><th class="r">12-1 momentum</th><th>Daily trend</th>', ranking, "")}</div></section>
 <section><div class="sh"><h2>Month by month</h2><span class="meta">paper results after costs</span></div>
 {tbl('<th>Month</th><th class="r">Portfolio</th><th class="r">NIFTY 500</th><th class="r">Momentum ETF</th><th class="r">Equal weight</th><th class="r">Turnover</th>', hist, "First month in progress — results appear here as each month closes.")}</section></div>
-<p class="note below"><b>Rules</b> (same as momentum_backtest.py): at each month-end, rank the stocks by their return over the past
+<details class="note below"><summary>Rules and caveats</summary><b>Rules</b> (same as momentum_backtest.py): at each month-end, rank the stocks by their return over the past
 12 months skipping the latest month; hold the top {MOM_TOP} in equal weight from the next month's first open; charge delivery costs
 (~{MOM_COST:.2f}% per round trip) on every stock swapped. Universe: the Nifty 500 (October 2026 was formed from the earlier
 150-stock list). Benchmarks: NIFTY 500, a listed Nifty500 Momentum 50 ETF (NSE's real momentum index, after fund costs) and an
 equal-weight portfolio of all the stocks. <b>Read with care:</b> the historical backtests (momentum_report.md,
 momentum_report_n500.md) are inflated by survivorship bias — over Aug 2022 – Sep 2026 a real Nifty200 Momentum 30 ETF beat the
 Nifty 200 by about 2.7 points a year, against ~19–23 in the backtests. This tab is a forward paper record from {e(mon(since))}, so it carries no such bias.
-Paper tracking only — not a recommendation; speak to a SEBI-registered adviser before investing.</p>"""
+Paper tracking only — not a recommendation; speak to a SEBI-registered adviser before investing.</details>"""
 
 
 def write_dashboard(state):
@@ -1485,7 +1560,13 @@ def write_dashboard(state):
     universe = meta.get("universe") or NIFTY150
     stocks = {s: state[s] for s in universe if s in state}
     log = state.get(SIGNAL_LOG_KEY, [])
-    archive = state.get(ARCHIVE_KEY, [])
+    archive = [h for h in state.get(ARCHIVE_KEY, []) if not h["strategy"].startswith("EMA_")]
+    n100 = meta.get("n100") or (sorted(pd.read_csv(NIFTY100_FALLBACK)["Symbol"].str.strip())
+                                if NIFTY100_FALLBACK.exists() else [])
+
+    def hhmm(sig):
+        """Candle time (HH:MM) of a live signal, for the Focus time window."""
+        return str(sig.get("bar") or sig["time"])[11:16]
 
     # ── index strip
     ix_html = []
@@ -1550,7 +1631,7 @@ def write_dashboard(state):
         return f'<td class="r">{_pct(h.get("mfe"))}</td><td class="r hide-sm">{_pct(h.get("mae"))}</td>'
 
     conf_rows = "".join(
-        f'<tr data-sym="{e(c["name"])}"><td>{_tv(c["name"])}</td>'
+        f'<tr data-sym="{e(c["name"])}" data-t="{hhmm(c["st"] if c["st"]["time"] > c["adx"]["time"] else c["adx"])}"><td>{_tv(c["name"])}</td>'
         f'<td>{_tag("CONFIRMED " + c["dir"].upper())}</td>'
         f'<td>{_tag(c["st"]["label"])} <span class="mu">{e(fmt_time(c["st"]["time"]))}</span></td>'
         f'<td>{_tag(c["adx"]["label"])} <span class="mu">{e(fmt_time(c["adx"]["time"]))}</span></td>'
@@ -1560,12 +1641,63 @@ def write_dashboard(state):
         for c in conf_today)
     live_rows = "".join(
         f'<tr data-sym="{e(s["name"])}" data-dir="{_direction(s["label"])}" '
+        f'data-t="{"12:00" if s["strategy"].startswith("EMA_") else hhmm(s)}" '
         f'{" class=fresh" if s["time"] == scan_time else ""}>'
         f'<td class="mu">{e(fmt_time(s["time"]))}</td><td>{_tv(s["name"])}</td><td>{_tag(s["label"])}</td>'
         f'<td class="mu hide-sm">{_strat_name(s["strategy"])}</td><td class="r">{_fmt_price(s["price"])}</td>'
         f'<td class="r">{_pct(now_move(s))}</td>'
         f'{excursion_cells(_match_replay(archive, s["name"], (s["strategy"],), _direction(s["label"]), s["time"][:10], s["time"]))}</tr>'
         for s in today)
+
+    # ── daily EMA crosses (last DAILY_CROSS_DAYS sessions), newest first
+    crosses = []
+    for key, info in state.items():
+        if not isinstance(info, dict) or not info.get("dx"):
+            continue
+        nm = info.get("name") or key
+        for x in info["dx"]:
+            crosses.append((x, nm, _current_price(state, nm)))
+    crosses.sort(key=lambda t: (t[0]["date"], t[1]), reverse=True)
+
+    def cross_row(x, nm, now_px):
+        mv = (now_px / x["px"] - 1) * 100 * x["d"] if now_px and x["px"] else None
+        kind = "EMA 50×200" if x["k"] == "EMA_GOLDEN" else "EMA 50×100"
+        what = (("GOLDEN" if x["d"] == 1 else "DEATH") if x["k"] == "EMA_GOLDEN" else ("BUY" if x["d"] == 1 else "SELL"))
+        forming = ' <span class="tag mute" title="Today\'s candle is still open — final at 3:30 PM">forming</span>' if x["f"] else ""
+        return (f'<tr data-sym="{e(nm)}" data-t="12:00" data-dir="{"buy" if x["d"] == 1 else "sell"}"><td class="mu">{e(fmt_day(x["date"]))}</td>'
+                f'<td>{_tv(nm)}</td><td>{_tag(what, "up" if x["d"] == 1 else "dn")}{forming}</td><td class="mu hide-sm">{kind}</td>'
+                f'<td class="r">{_fmt_price(x["px"])}</td><td class="r">{_fmt_price(now_px)}</td><td class="r">{_pct(mv)}</td></tr>')
+    cross_rows = "".join(cross_row(*t) for t in crosses)
+
+    # 5-year record of the daily crosses, for the Accuracy tab (all stocks / Nifty 100)
+    def cross_record(names):
+        groups = {}
+        for nm in names:
+            info = state.get(nm) or state.get(INDEX_STATE_PREFIX + nm) or {}
+            for kind, d, mv, held, still_open in info.get("dxs", []):
+                groups.setdefault((kind, d), []).append((mv, held, still_open))
+        out = []
+        for kind, title in ((0, "EMA 50×100 — Early Cross"), (1, "EMA 50×200 — Golden / Death Cross")):
+            out.append(f'<tr class="grp"><td colspan="7">{title} (hold until the opposite cross)</td></tr>')
+            for d in (1, -1):
+                g = groups.get((kind, d), [])
+                closed = [m for m, _, o in g if not o]
+                lbl = ("GOLDEN" if d == 1 else "DEATH") if kind else ("BUY" if d == 1 else "SELL")
+                if not closed:
+                    out.append(f'<tr><td>{_tag(lbl, "up" if d == 1 else "dn")}</td><td class="r" colspan="6"><span class="fa">—</span></td></tr>')
+                    continue
+                win = sum(m > 0 for m in closed) / len(closed) * 100
+                srt = sorted(closed)
+                medv = srt[len(srt) // 2] if len(srt) % 2 else (srt[len(srt) // 2 - 1] + srt[len(srt) // 2]) / 2
+                held = sorted(h for _, h, o in g if not o)
+                out.append(f'<tr><td>{_tag(lbl, "up" if d == 1 else "dn")}</td><td class="r">{len(g)}</td>'
+                           f'<td class="r">{len(g) - len(closed)}</td>'
+                           f'<td><div class="wr"><span style="min-width:38px">{win:.0f}%</span><span class="tr"><b class="{"lo" if win < 50 else ""}" style="width:{win:.0f}%"></b></span></div></td>'
+                           f'<td class="r">{_pct(sum(closed) / len(closed))}</td><td class="r">{_pct(medv)}</td>'
+                           f'<td class="r">{held[len(held) // 2]}</td></tr>')
+        return "".join(out)
+    rec_all = cross_record(list(stocks) + list(INDEX_TICKERS))
+    rec_n100 = cross_record([n for n in n100 if n in stocks] + list(INDEX_TICKERS))
 
     # ── past signals (replayed, last HISTORY_DAYS sessions)
     days_all = sorted({h["time"][:10] for h in archive}, reverse=True)
@@ -1577,7 +1709,7 @@ def write_dashboard(state):
     # Accuracy (overall or per stock/index) are drawn from it in the browser.
     # Row: [time, name#, label, strategy (0 ST / 1 ADX / 2 CONFIRMED), price,
     #       exit price, bars, open, max gain, max drawdown]
-    strat_code = {"SuperTrend": 0, "ADX_DI": 1, "CONFIRMED": 2, "EMA_EARLY": 3, "EMA_GOLDEN": 4}
+    strat_code = {"SuperTrend": 0, "ADX_DI": 1, "CONFIRMED": 2}
     names = sorted({h["name"] for h in archive})
     name_ix = {n: i for i, n in enumerate(names)}
     arch_rows = [[h["time"], name_ix[h["name"]], h["label"], strat_code[h["strategy"]], round(h["price"], 2),
@@ -1593,7 +1725,8 @@ def write_dashboard(state):
 
     data_js = ("const NAMES=" + json.dumps(names) + ";const ARCH_GZ=\"" + gz(json.dumps(arch_rows, separators=(",", ":"))) + "\""
                + ";const PX=" + json.dumps(prices, separators=(",", ":"))
-               + ";const PDAYS=new Set(" + json.dumps(past_days) + ");const SIM_LEVELS="
+               + ";const PDAYS=new Set(" + json.dumps(past_days) + ");const N100=new Set(" + json.dumps(n100 + list(INDEX_TICKERS))
+               + ");const FOCUS_WIN=" + json.dumps([FOCUS_FROM, FOCUS_TO]) + ";const SIM_LEVELS="
                + json.dumps(list(SIM_LEVELS)) + ";const TVI=" + json.dumps(TV_INDEX)
                + ";").replace("</", "<\\/")
     per_day = {d: sum(1 for h in past if h["time"][:10] == d) for d in past_days}
@@ -1642,6 +1775,7 @@ def write_dashboard(state):
                 + (f'<optgroup label="Stocks">{stk_opts}</optgroup>' if stk_opts else ""))
 
     # ── stocks
+    days_all_latest = max((h["time"][:10] for h in archive), default=None)
     last_sig = {}
     for h in sorted(strategy_signals(archive), key=lambda x: x["time"]):
         last_sig[h["name"]] = h
@@ -1649,6 +1783,10 @@ def write_dashboard(state):
         if s["name"] not in last_sig or s["time"] > last_sig[s["name"]]["time"]:
             last_sig[s["name"]] = s
     fresh = {s["name"] for s in log if s["time"] == scan_time}
+    # "Setups": a double confirmation on the latest day, or a daily EMA cross in the last DAILY_CROSS_DAYS sessions
+    sig_today = ({c["name"] for c in conf_today}
+                 | {h["name"] for h in archive if h["strategy"] == "CONFIRMED" and h["time"][:10] == days_all_latest}
+                 | {sym for sym, v in stocks.items() if v.get("dx")})
     sectors = meta.get("sectors", {})
     newest_bar = max((v.get("last_ts", "") for v in stocks.values()), default="")
     stale = {sym for sym, v in stocks.items() if v.get("last_ts", "") < newest_bar}
@@ -1665,7 +1803,7 @@ def write_dashboard(state):
         stale_tag = (f' <span class="tag mute" title="Latest candle is {e(fmt_stamp(info.get("last_ts", "")))} — '
                      f'Yahoo hasn\'t published newer data for this stock">stale</span>' if sym in stale else "")
         stock_rows.append(
-            f'<tr data-sym="{e(sym)}" data-sector="{e(sector)}" data-stale="{int(sym in stale)}" '
+            f'<tr data-sym="{e(sym)}" data-sector="{e(sector)}" data-stale="{int(sym in stale)}" data-today="{int(sym in sig_today)}" '
             f'data-st="{st}" data-adx="{adx}" data-dist="{dist if dist is not None else 999}" '
             f'data-chg="{chg if chg is not None else 0}" data-px="{info.get("last_close") or 0}" '
             f'data-mv="{mv if mv is not None else -999}" '
@@ -1722,15 +1860,16 @@ document.documentElement.dataset.theme=t;}}catch(e){{}}</script>
 <div class="top"><div class="wrap">
 <div class="bar1"><div class="brand"><div class="logo"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l5-5 4 4 8-9"/><path d="M15 7h5v5"/></svg></div><div style="min-width:0"><h1>Technical Dashboard</h1>
 <div class="sub">SuperTrend ({ATR_PERIOD}×{MULTIPLIER:g}) + ADX DI · {sub}</div></div></div>
-<div class="tools-r"><span class="status" id="status"><i></i><span class="lbl">Waiting</span></span>
+<div class="tools-r"><button class="fbtn on" id="focus" title="Focus: only Nifty 100 stocks + indices, and only signals from 9:45 AM to 2:30 PM. Click to show everything.">Focus</button>
+<span class="status" id="status"><i></i><span class="lbl">Waiting</span></span>
 <button class="iconbtn theme" id="theme" title="Light / dark" aria-label="Switch light or dark theme">
 <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
 stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
 <svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
 <circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
 </button></div></div>
-<nav class="tabs"><button class="tab" data-v="live">Live<span class="n">{len(today)}</span></button>
-<button class="tab" data-v="past">Past signals<span class="n">{len(past)}</span></button>
+<nav class="tabs"><button class="tab" data-v="live">Live</button>
+<button class="tab" data-v="past">Past signals</button>
 <button class="tab" data-v="accuracy">Accuracy</button>
 <button class="tab" data-v="momentum">Momentum</button>
 <button class="tab" data-v="stocks">Stocks<span class="n">{len(stocks)}</span></button></nav>
@@ -1740,22 +1879,26 @@ stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
 <div class="view" id="v-live">
 <div class="idx">{"".join(ix_html) or '<div class="panel empty" style="grid-column:1/-1">No index data yet.</div>'}</div>
 <div class="kpis k5">{kpis}</div>
-<section><div class="sh"><h2>Double confirmations</h2><span class="meta">{e(fmt_day(latest_day)) if latest_day else ""}</span></div>
+<section><div class="sh"><h2>Double confirmations</h2><span class="meta" id="c-conf">{e(fmt_day(latest_day)) if latest_day else ""}</span></div>
 <p class="note">SuperTrend and ADX DI gave the same signal on the same day — the latest signal of each counts.</p>
 {table("t-conf", '<th>Stock</th><th>Setup</th><th>SuperTrend</th><th>ADX DI</th><th class="r">At signal</th><th class="r">Now</th><th class="r">Move</th><th class="r">Max gain</th><th class="r hide-sm">Max drawdown</th>',
        conf_rows, "No double confirmations today yet.")}</section>
-<section><div class="sh"><h2>Today's signals</h2><div class="tb" style="margin:0">
-<div class="seg" id="f-live-dir"><button class="on" data-f="all">All</button>
-<button data-f="buy">Buy</button><button data-f="sell">Sell</button></div></div></div>
+<section><div class="sh"><h2>Daily EMA crosses</h2><span class="meta" id="c-dx">last {DAILY_CROSS_DAYS} sessions</span></div>
+<p class="note">EMA50 crossing EMA100 (early cross) or EMA200 (golden / death cross) on daily candles — the TradingView "EMA 50, 100 and 200" indicator.</p>
+{table("t-dx", '<th>Day</th><th>Stock</th><th>Cross</th><th class="hide-sm">EMAs</th><th class="r">At cross</th><th class="r">Now</th><th class="r">Move</th>',
+       cross_rows, "No daily EMA crosses in this window.")}</section>
+<details class="more"><summary>All signals today <span class="mu" id="c-live"></span></summary>
+<div class="tb" style="margin:12px 0"><div class="seg" id="f-live-dir"><button class="on" data-f="all">All</button>
+<button data-f="buy">Buy</button><button data-f="sell">Sell</button></div></div>
 {table("t-live", '<th>Time</th><th>Stock</th><th>Signal</th><th class="hide-sm">Strategy</th><th class="r">Price</th><th class="r">Move</th><th class="r">Max gain</th><th class="r hide-sm">Max drawdown</th>',
-       live_rows, "No signals yet today — they appear here as each scan finds them.")}</section>
+       live_rows, "No signals yet today — they appear here as each scan finds them.")}</details>
 </div>
 
 <div class="view" id="v-past">
 <div class="sh"><h2>Past signals</h2><span class="meta" id="c-past"></span></div>
 <div class="tb"><select class="sel" id="f-past-day" aria-label="Day">{day_opts or '<option value="">No data yet</option>'}</select>
 <div class="seg" id="f-past-dir"><button class="on" data-f="all">All</button><button data-f="buy">Buy</button><button data-f="sell">Sell</button></div>
-<div class="seg" id="f-past-strat"><button class="on" data-f="all">All</button><button data-f="SuperTrend">SuperTrend</button><button data-f="ADX_DI">ADX DI</button><button data-f="EMA_EARLY" title="EMA50 crosses EMA100 (Early Cross)">EMA 50×100</button><button data-f="EMA_GOLDEN" title="EMA50 crosses EMA200 (Golden / Death Cross)">EMA 50×200</button></div>
+<div class="seg" id="f-past-strat"><button class="on" data-f="all">All</button><button data-f="SuperTrend">SuperTrend</button><button data-f="ADX_DI">ADX DI</button></div>
 <select class="sel" id="f-past-sess" aria-label="Time of day"><option value="">All day</option>
 <option value="09:15-11:00">9:15 – 11 AM</option><option value="11:00-14:00">11 AM – 2 PM</option>
 <option value="14:00-15:30">2 – 3:30 PM</option></select>
@@ -1768,11 +1911,12 @@ stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
 {"".join(day_sums)}
 {table("t-past", '<th class="sorted desc" data-k="t" data-asc="0">Time</th><th data-k="sym" data-asc="1">Stock</th><th>Signal</th><th class="hide-md">Strategy</th><th class="r hide-sm">Price</th><th class="r hide-md">Exit</th><th class="r" data-k="mv" data-asc="0">Move</th><th class="r" data-k="mfe" data-asc="0">Max gain</th><th class="r hide-sm" data-k="mae" data-asc="1">Max drawdown</th><th class="r" data-k="bars" data-asc="1">Bars</th>',
        "", "No signals match these filters.")}
-<p class="note below">Every signal from the last {HISTORY_DAYS} sessions, replayed bar by bar from 15-minute data. Time = the
+<details class="note below"><summary>How to read this table</summary>Every signal from the last {HISTORY_DAYS} sessions, replayed bar by bar from 15-minute data. Time = the
 15-min candle the signal formed on (labelled by its start, like TradingView); <b>Move</b> = price change in the signal's favour
 up to its flip (or to now if still open); <b>Max gain</b> / <b>Max drawdown</b> = furthest price went in the signal's favour /
 against it before the flip; <b>Bars</b> = 15-min bars until that strategy flipped (SuperTrend reversed / ADX left that side).
-✓ = part of a double confirmation that day.</p>
+✓ = part of a double confirmation that day. <b>Focus</b> (top right) limits this to Nifty 100 stocks + indices and
+signals from 9:45 AM to 2:30 PM; switch it off to see everything.</details>
 </div>
 
 <div class="view" id="v-accuracy">
@@ -1786,7 +1930,15 @@ against it before the flip; <b>Bars</b> = 15-min bars until that strategy flippe
 <th class="r">Median max drawdown</th><th class="r hide-sm">Avg move</th>
 <th class="r" title="Closed signals at their exit plus open signals at today's price">Avg incl. open</th>
 <th class="r hide-sm">Open · now</th></tr></thead><tbody id="acc-body"></tbody></table></div>
-<section style="margin-top:26px"><div class="sh"><h2>Exit-rule simulator</h2>
+<section style="margin-top:26px"><div class="sh"><h2>Daily EMA crosses — 5-year record</h2>
+<span class="meta">every cross since 2021 on daily candles, held until the opposite cross · before costs</span></div>
+<div class="panel tw"><table><thead><tr><th>Cross</th><th class="r">Crosses</th><th class="r">Still open</th><th>Win rate</th>
+<th class="r">Avg move</th><th class="r">Median move</th><th class="r">Median sessions held</th></tr></thead>
+<tbody id="dx-n100">{rec_n100}</tbody><tbody id="dx-all" style="display:none">{rec_all}</tbody></table></div>
+<p class="note below">Today's Nifty 500 / 100 members only, so stocks that dropped out of the index are missing (survivorship bias
+flatters these numbers). Open crosses aren't in the win rate. A delivery round trip costs ~{MOM_COST:.2f}%.</p></section>
+<details class="more"><summary>More analysis — exit simulator, equity curve, time of day, stock leaderboard</summary>
+<section style="margin-top:18px"><div class="sh"><h2>Exit-rule simulator</h2>
 <span class="meta">what if you exited at a profit target or stop-loss instead of waiting for the flip?</span></div>
 <div class="tb"><label class="chk">Target <select class="sel" id="sim-t"></select></label>
 <label class="chk">Stop-loss <select class="sel" id="sim-s"></select></label>
@@ -1802,20 +1954,20 @@ against it before the flip; <b>Bars</b> = 15-min bars until that strategy flippe
 <th>Win rate</th><th class="r">Avg move</th><th class="r">Median max gain</th></tr></thead><tbody id="acc-hour"></tbody></table></div></section>
 <section id="lb-wrap"><div class="sh"><h2>Stock leaderboard</h2><span class="meta">min 5 closed signals · by avg move</span></div>
 <div class="panel tw"><table><thead><tr><th>Stock</th><th class="r">Closed</th><th>Win rate</th><th class="r">Avg move</th>
-<th class="r hide-sm">Median max gain</th></tr></thead><tbody id="acc-lb"></tbody></table></div></section></div>
+<th class="r hide-sm">Median max gain</th></tr></thead><tbody id="acc-lb"></tbody></table></div></section></div></details>
 <section id="acc-log-wrap" style="display:none;margin-top:26px"><div class="sh"><h2 id="acc-log-title">Signals</h2>
 <span class="meta" id="acc-log-count"></span></div>
 <div class="panel tw"><table><thead><tr><th>When</th><th>Signal</th><th class="hide-sm">Strategy</th>
 <th class="r hide-sm">Price</th><th class="r hide-md">Exit</th><th class="r">Move</th><th class="r">Max gain</th>
 <th class="r hide-sm">Max drawdown</th><th class="r">Bars</th></tr></thead><tbody id="acc-log"></tbody></table></div></section>
-<p class="note below">A signal <b>wins</b> if price moved in its favour (up after a buy, down after a sell) by the bar where that
+<details class="note below"><summary>How these numbers are worked out</summary>A signal <b>wins</b> if price moved in its favour (up after a buy, down after a sell) by the bar where that
 strategy flipped. <b>Median bars</b> = 15-min bars until the flip; <b>Median move</b> = typical % move in the signal's favour at
 the flip; <b>Max gain</b> / <b>Max drawdown</b> = the furthest price went in the signal's favour / against it
 (candle highs and lows) before the flip. Open signals aren't in the win rate or median move — <b>Avg incl. open</b> adds them at today's price, and ⚠ flags rows
-where many signals are still open (slow strategies such as the EMA crosses), where closed-only figures understate them. Builds up to {ARCHIVE_KEEP_DAYS} days of history.
+where many signals are still open, where closed-only figures understate them. Builds up to {ARCHIVE_KEEP_DAYS} days of history.
 <b>Simulator</b>: a trade exits at the target or stop, whichever price reaches first (if both are touched in the same 15-min candle
 it assumes the stop — the cautious choice); otherwise at the flip. Open signals that haven't hit either level aren't counted.
-Ignores brokerage, taxes and slippage.</p>
+Ignores brokerage, taxes and slippage. <b>Focus</b> (top right) applies here too.</details>
 </div>
 
 <div class="view" id="v-momentum">
@@ -1829,7 +1981,7 @@ Ignores brokerage, taxes and slippage.</p>
 <div class="sh"><h2>All stocks</h2><span class="meta" id="c-stocks"></span></div>
 <div class="tb"><input type="search" id="f-stk-q" placeholder="Search stock…" autocomplete="off">
 <select class="sel" id="f-stk-sector" aria-label="Sector">{sector_opts}</select>
-<div class="seg" id="f-stk-view"><button class="on" data-f="all">All</button><button data-f="fav" title="Your starred stocks">★</button>
+<div class="seg" id="f-stk-view"><button class="on" data-f="today" title="Double confirmation on the latest day or a daily EMA cross in the last {DAILY_CROSS_DAYS} sessions, plus your starred stocks">Setups + ★</button><button data-f="all">All {len(stocks)}</button><button data-f="fav" title="Your starred stocks">★</button>
 <button data-f="golden" title="Daily EMA50 above EMA200">Golden cross</button><button data-f="death" title="Daily EMA50 below EMA200">Death cross</button>
 <button data-f="fresh" title="Golden or death cross in the last 10 sessions">New cross</button><button data-f="aligned" title="SuperTrend and ADX DI point the same way">Aligned</button>
 <button data-f="near" title="Within {WATCHLIST_PCT:g}% of a SuperTrend flip">Near flip</button><button data-f="long">ST long</button>
@@ -1889,8 +2041,7 @@ INDEX_STATE_PREFIX = "__INDEX__"  # state keys for indices, kept apart from stoc
 
 
 def evaluate(name, df, prev, htf=None):
-    """Run the strategies (SuperTrend, ADX DI, EMA 50×100 and EMA 50×200
-    crosses) on one bar series. Returns (new_state, fired) where
+    """Run the strategies (SuperTrend, ADX DI) on one bar series. Returns (new_state, fired) where
     fired lists the signals that changed since `prev` (last cycle's state).
     `htf` (from htf_trends) adds the 1-hour trend gate."""
     h = df["high"].to_numpy(dtype=np.float64)
@@ -1911,20 +2062,9 @@ def evaluate(name, df, prev, htf=None):
     condition = _build_condition(di_plus, di_minus, sig, HL_RANGE, HL_TREND, is_open)
     adx_cond = float(condition[-1])
 
-    # EMA 50 / 100 / 200 on the same 15-min candles — the TradingView indicator's
-    # Early Cross (EMA50 × EMA100) and Golden / Death Cross (EMA50 × EMA200)
-    cs = pd.Series(c)
-    e50, e100, e200 = (cs.ewm(span=n, adjust=False).mean().to_numpy() for n in (50, 100, 200))
-    ema_early = np.sign(e50 - e100).astype(np.int8)
-    ema_golden = np.sign(e50 - e200).astype(np.int8)
-
     fired = []
     prev_st = prev.get("st_trend")
     prev_adx = prev.get("adx_cond")
-    for key, side, strat in (("ema_early", ema_early, "EMA_EARLY"), ("ema_golden", ema_golden, "EMA_GOLDEN")):
-        was = prev.get(key)
-        if was in (1, -1) and side[-1] in (1, -1) and side[-1] != was:
-            fired.append((strat, name, "BUY" if side[-1] == 1 else "SELL", last_close, last_ts))
     if prev_st is not None and prev_st == -1 and st_trend == 1:
         fired.append(("SuperTrend", name, "BUY", last_close, last_ts))
     if prev_st is not None and prev_st == 1 and st_trend == -1:
@@ -1943,11 +2083,10 @@ def evaluate(name, df, prev, htf=None):
                    if len(prev_session) and prev_session[-1] else None)
 
     new_state = {"st_trend": st_trend, "adx_cond": adx_cond, "last_ts": last_ts,
-                 "ema_early": int(ema_early[-1]), "ema_golden": int(ema_golden[-1]),
                  "last_close": last_close, "distance_pct": distance_pct,
                  "day_chg_pct": day_chg_pct, "name": name,
                  "tf1h": htf_at(htf, "1h", df.index[-1] + pd.Timedelta(minutes=15)),
-                 "history": bar_signals(name, df, c, trend, condition, htf, ema_early, ema_golden),
+                 "history": bar_signals(name, df, c, trend, condition, htf),
                  "history_from": str(df.index[np.isin(dates, sorted(set(dates))[-REPLAY_DAYS:])][0])}
     return new_state, fired
 
@@ -1959,15 +2098,14 @@ ARCHIVE_KEY = "__ARCHIVE__"
 ARCHIVE_KEEP_DAYS = 30   # calendar days of replayed signals kept for the accuracy tracker
 
 
-def bar_signals(name, df, close, trend, condition, htf=None, ema_early=None, ema_golden=None):
+def bar_signals(name, df, close, trend, condition, htf=None):
     """Every signal the strategies gave, bar by bar, over the last REPLAY_DAYS
     trading days in `df` — the same state changes the live scan alerts on, but
     replayed on completed bars. "time" is the 15-min candle the signal formed
     on, labelled by its start like TradingView (the 3:15 PM candle closes the
     session at 3:30); "price" is that candle's close.
     "bars" is how many 15-min bars the signal lasted before that strategy
-    turned (SuperTrend flipped back / ADX left that side / the EMA pair crossed
-    back the other way); "open" means it
+    turned (SuperTrend flipped back / ADX left that side); "open" means it
     hasn't turned yet and "bars" counts the bars so far. "exit_price" /
     "exit_time" are the close and candle time of the bar where it turned.
     "mfe" / "mae" are the maximum move in the signal's favour / against it
@@ -2047,10 +2185,7 @@ def bar_signals(name, df, close, trend, condition, htf=None, ema_early=None, ema
             labels.append(("ADX_DI", "BUY_STRONG" if cur == 1.0 else "BUY"))
         elif cur in (-1.0, -0.5) and prv not in (-1.0, -0.5):
             labels.append(("ADX_DI", "SELL_STRONG" if cur == -1.0 else "SELL"))
-        for strat, side in (("EMA_EARLY", ema_early), ("EMA_GOLDEN", ema_golden)):
-            if side is not None and side[i] in (1, -1) and side[i - 1] in (1, -1) and side[i] != side[i - 1]:
-                labels.append((strat, "BUY" if side[i] == 1 else "SELL"))
-        sides = {"SuperTrend": st_side, "ADX_DI": adx_side, "EMA_EARLY": ema_early, "EMA_GOLDEN": ema_golden}
+        sides = {"SuperTrend": st_side, "ADX_DI": adx_side}
         for strat, label in labels:
             end, still_open = flip_index(sides[strat], i)
             out.append(entry(i, end, still_open, strat, label))
@@ -2087,7 +2222,8 @@ def archive_history(state, new_state):
     name = history[0]["name"] if history else new_state.get("name")
     cutoff = (datetime.now(IST) - timedelta(days=ARCHIVE_KEEP_DAYS)).strftime("%Y-%m-%d")
     archive = [h for h in state.get(ARCHIVE_KEY, [])
-               if h["time"][:10] >= cutoff and not (h["name"] == name and h["bar"] >= since)]
+               if h["time"][:10] >= cutoff and not (h["name"] == name and h["bar"] >= since)
+               and not h["strategy"].startswith("EMA_")]   # 15-min EMA crosses retired (now daily)
     state[ARCHIVE_KEY] = archive + history
 
 
@@ -2115,8 +2251,10 @@ def scan_indices(state):
             df = fetch_15m(name, yf_ticker)
             if df is None or len(df) < 60:
                 continue
-            state[key], index_fired = evaluate(name, df, state.get(key, {}), htf_trends(name, yf_ticker, df))
+            prev = state.get(key, {})
+            state[key], index_fired = evaluate(name, df, prev, htf_trends(name, yf_ticker, df))
             state[key].update(daily_ema_trend(name, yf_ticker, df))
+            index_fired += daily_cross_alerts(name, prev, state[key])
             archive_history(state, state[key])
             fired.extend(index_fired)
         except Exception as e:
@@ -2158,9 +2296,10 @@ def scan_once(per_symbol_delay=None):
             if df is None or len(df) < 60:
                 continue
 
-            state[symbol], symbol_fired = evaluate(symbol, df, state.get(symbol, {}),
-                                                   htf_trends(symbol, f"{symbol}.NS", df))
+            prev = state.get(symbol, {})
+            state[symbol], symbol_fired = evaluate(symbol, df, prev, htf_trends(symbol, f"{symbol}.NS", df))
             state[symbol].update(daily_ema_trend(symbol, f"{symbol}.NS", df))
+            symbol_fired += daily_cross_alerts(symbol, prev, state[symbol])
             archive_history(state, state[symbol])
             fired.extend(symbol_fired)
             checked += 1
@@ -2198,8 +2337,9 @@ def scan_once(per_symbol_delay=None):
                for strategy, name, label, price, ts in fired)
     state[SIGNAL_LOG_KEY] = log[-SIGNAL_LOG_MAX:]
     sectors = {**state.get(SCAN_META_KEY, {}).get("sectors", {}), **SECTORS}
+    n100 = load_nifty100() or state.get(SCAN_META_KEY, {}).get("n100", [])
     state[SCAN_META_KEY] = {"time": now_str, "checked": checked, "total": len(universe), "sectors": sectors,
-                            "universe": universe}
+                            "universe": universe, "n100": n100}
 
     save_state(state)
     save_bars_cache()
