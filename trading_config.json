@@ -1,0 +1,38 @@
+{
+  "_help": "Edit this file on GitHub (pencil icon) to change the paper portfolio rules, your momentum budget and your price alerts. Amounts are in rupees. The next scan picks up the change.",
+
+  "paper": {
+    "_help": "Paper portfolio: takes every double confirmation (SuperTrend + ADX DI) on Nifty 100 stocks inside the time window, as an intraday trade. Exits at the target, the stop, the first flip of either strategy, or the 3:15 PM square-off. Nothing is ever really bought or sold.",
+    "capital": 200000,
+    "per_trade": 20000,
+    "max_open": 8,
+    "max_trades_per_day": 10,
+    "daily_loss_limit_pct": 2,
+    "cash_buffer_pct": 10,
+    "target_pct": 3,
+    "stop_pct": 2,
+    "window": ["09:45", "14:30"],
+    "square_off": "15:00",
+    "cost_pct": 0.122
+  },
+
+  "momentum": {
+    "_help": "Your budget for the monthly momentum portfolio. The Momentum tab turns it into whole-share orders: what to buy if you start now, and what to sell and buy at the next rebalance.",
+    "budget": 200000,
+    "cash_buffer_pct": 5,
+    "max_position_pct": 10,
+    "band_pct": 2,
+    "min_order": 1000
+  },
+
+  "alerts": [],
+
+  "_alert_examples": [
+    {"symbol": "RELIANCE", "above": 1500, "note": "breakout level"},
+    {"symbol": "HDFCBANK", "below": 1850},
+    {"symbol": "INFY", "stop": 1400, "note": "my stop", "rearm": true},
+    {"symbol": "NIFTY 50", "pct": 1.5, "direction": "down"},
+    {"symbol": "TCS", "pct": 3}
+  ],
+  "_alerts_help": "Copy examples into \"alerts\" to switch them on. above / below / stop ring once when the price reaches the level (\"rearm\": true lets it ring again after the price moves back). pct rings at most once a day when the day's move from the previous close reaches that percent (direction up, down or either). Alerts go to Telegram and show on the Live tab."
+}

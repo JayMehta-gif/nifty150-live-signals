@@ -704,6 +704,239 @@ def update_momentum(state, universe):
     }
 
 
+# ─── trading_config.json: paper portfolio, momentum budget, price alerts ────────
+
+CONFIG_FILE = Path(__file__).parent / "trading_config.json"
+CONFIG_DEFAULTS = {
+    "paper": {"capital": 200000, "per_trade": 20000, "max_open": 8, "max_trades_per_day": 10,
+              "daily_loss_limit_pct": 2, "cash_buffer_pct": 10, "target_pct": 3, "stop_pct": 2,
+              "window": ["09:45", "14:30"], "square_off": "15:00", "cost_pct": 0.122},
+    "momentum": {"budget": 200000, "cash_buffer_pct": 5, "max_position_pct": 10, "band_pct": 2, "min_order": 1000},
+    "alerts": [],
+}
+
+
+def load_trading_config():
+    """trading_config.json merged over the defaults (a missing or broken file
+    falls back to the defaults, with a warning)."""
+    cfg = json.loads(json.dumps(CONFIG_DEFAULTS))
+    try:
+        user = json.loads(CONFIG_FILE.read_text(encoding="utf-8")) if CONFIG_FILE.exists() else {}
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] trading_config.json unreadable ({e}); using defaults")
+        user = {}
+    for k in ("paper", "momentum"):
+        cfg[k].update({kk: vv for kk, vv in (user.get(k) or {}).items() if not kk.startswith("_")})
+    cfg["alerts"] = [a for a in (user.get("alerts") or []) if isinstance(a, dict) and a.get("symbol")]
+    return cfg
+
+
+# ── paper portfolio: double confirmations, traded intraday inside risk limits ──
+PAPER_KEY = "__PAPER__"
+
+
+def _bars_for(name):
+    """Cached 15-min bars for a stock or index (whatever this scan fetched)."""
+    return load_bars_cache().get(INDEX_TICKERS.get(name, f"{name}.NS"))
+
+
+def _paper_exit(t, archive, cfg):
+    """Walk the 15-min bars after an open paper trade's entry candle and return
+    (exit_bar, price, reason) for the first exit, or None while it is still open.
+    Order inside a candle: stop before target when both are touched (the cautious
+    choice), then the strategies' first flip (from the replayed double
+    confirmation), then the square-off candle's close."""
+    df = _bars_for(t["sym"])
+    if df is None or df.empty:
+        return None
+    buy = t["dir"] == "buy"
+    flip = next((h for h in archive if h["strategy"] == "CONFIRMED" and h["name"] == t["sym"]
+                 and h["time"][:10] == t["day"] and ("SELL" in h["label"]) != buy and not h.get("open")
+                 and h.get("exit_time") and h["exit_time"] > t["bar"]), None)
+    after = df[(df.index.strftime("%Y-%m-%d %H:%M:%S") > t["bar"]) & (df.index.strftime("%Y-%m-%d") == t["day"])]
+    for ts, row in after.iterrows():
+        stamp = ts.strftime("%Y-%m-%d %H:%M:%S")
+        hi, lo = float(row["high"]), float(row["low"])
+        hit_stop = lo <= t["stop"] if buy else hi >= t["stop"]
+        hit_tgt = hi >= t["target"] if buy else lo <= t["target"]
+        if hit_stop:
+            return stamp, t["stop"], "stop"
+        if hit_tgt:
+            return stamp, t["target"], "target"
+        if flip and flip["exit_time"] == stamp:
+            return stamp, float(flip["exit_price"]), "flip"
+        if ts.strftime("%H:%M") >= cfg["square_off"]:
+            return stamp, float(row["close"]), "square-off"
+    # entry day is over but its last candle never reached the square-off time (data gap)
+    if len(after) and after.index[-1].date() < datetime.now(IST).date():
+        return after.index[-1].strftime("%Y-%m-%d %H:%M:%S"), float(after["close"].iloc[-1]), "square-off"
+    return None
+
+
+def update_paper(state, confirmed, now_str, cfg):
+    """Forward paper test of the one setup that was above zero out of sample:
+    double confirmations, intraday, +target / −stop. New entries pass a risk gate
+    (the trader-risk idea): duplicates, max open positions, max trades a day, the
+    daily loss limit and the cash buffer; anything blocked is logged with the
+    reason. Whole shares; costs charged on every round trip."""
+    p = state.setdefault(PAPER_KEY, {"since": now_str[:10], "trades": [], "skipped": []})
+    archive = state.get(ARCHIVE_KEY, [])
+    n100 = set(state.get(SCAN_META_KEY, {}).get("n100") or [])
+    trades = p["trades"]
+    # 1) exits for open trades
+    for t in trades:
+        if t["status"] != "open":
+            continue
+        out = _paper_exit(t, archive, cfg)
+        if out:
+            bar, px, why = out
+            sign = 1 if t["dir"] == "buy" else -1
+            gross = (px - t["entry"]) * t["qty"] * sign
+            cost = t["entry"] * t["qty"] * cfg["cost_pct"] / 100
+            t.update(status="closed", exit=round(px, 2), exit_bar=bar, reason=why,
+                     pnl=round(gross - cost, 2), pnl_pct=round((gross - cost) / (t["entry"] * t["qty"]) * 100, 3))
+    # 2) new entries through the risk gate
+    day = now_str[:10]
+    closed_today = [t for t in trades if t["status"] == "closed" and t["exit_bar"][:10] == day]
+    realised = sum(t["pnl"] for t in trades if t["status"] == "closed")
+    open_now = [t for t in trades if t["status"] == "open"]
+    cash = cfg["capital"] + realised - sum(t["entry"] * t["qty"] for t in open_now)
+    for c in confirmed:
+        name, direction, price, bar = c["name"], c["dir"], float(c["price"]), str(c["bar"])[:19]
+        if name not in n100 or not (cfg["window"][0] <= bar[11:16] < cfg["window"][1]):
+            continue  # outside the paper universe / time window: not a candidate at all
+        today_trades = [t for t in trades if t["day"] == day]
+        qty = int(cfg["per_trade"] // price) if price > 0 else 0
+        loss_today = sum(t["pnl"] for t in closed_today)
+        reason = None
+        if any(t["sym"] == name for t in today_trades):
+            reason = "already traded today"
+        elif len(open_now) >= cfg["max_open"]:
+            reason = f"{cfg['max_open']} positions already open"
+        elif len(today_trades) >= cfg["max_trades_per_day"]:
+            reason = f"daily limit of {cfg['max_trades_per_day']} trades reached"
+        elif loss_today <= -cfg["capital"] * cfg["daily_loss_limit_pct"] / 100:
+            reason = f"daily loss limit ({cfg['daily_loss_limit_pct']}%) hit"
+        elif qty < 1:
+            reason = "price above the per-trade amount"
+        elif cash - qty * price < cfg["capital"] * cfg["cash_buffer_pct"] / 100:
+            reason = "would dip into the cash buffer"
+        if reason:
+            p["skipped"] = (p["skipped"] + [{"time": now_str, "sym": name, "dir": direction, "price": price,
+                                             "reason": reason}])[-200:]
+            continue
+        sign = 1 if direction == "buy" else -1
+        t = {"sym": name, "dir": direction, "day": day, "bar": bar, "opened": now_str, "entry": round(price, 2),
+             "qty": qty, "target": round(price * (1 + sign * cfg["target_pct"] / 100), 2),
+             "stop": round(price * (1 - sign * cfg["stop_pct"] / 100), 2), "status": "open"}
+        trades.append(t)
+        open_now.append(t)
+        cash -= qty * price
+    p["trades"] = trades[-2000:]
+
+
+# ── momentum orders sized to the user's budget (the trader-budget / -rebalance idea) ──
+def momentum_orders(view, state, cfg):
+    """Whole-share orders for the momentum portfolio at today's prices:
+    `start` = buy this month's portfolio from scratch; `rebalance` = what changes
+    at the next month's first open if you hold this month's portfolio as sized at
+    its entry prices (sells first; stocks staying are only resized when they
+    drift more than band_pct points; orders under min_order are skipped)."""
+    budget = cfg["budget"]
+    sleeve = budget * (1 - cfg["cash_buffer_pct"] / 100)
+
+    def px(sym):
+        return (state.get(sym) or {}).get("last_close")
+
+    def size(syms):
+        w = min(1 / len(syms), cfg["max_position_pct"] / 100 * budget / sleeve) if syms else 0
+        out = []
+        for s in syms:
+            p = px(s)
+            q = int(sleeve * w // p) if p else 0
+            out.append({"sym": s, "price": p, "qty": q, "amount": round(q * p, 2) if p else 0})
+        return out
+    start = size([r["sym"] for r in view["rows"]])
+    held = {}
+    for r in view["rows"]:
+        q = int(sleeve / len(view["rows"]) // r["entry"]) if r["entry"] else 0
+        held[r["sym"]] = q
+    value = {s: q * (px(s) or 0) for s, q in held.items()}
+    cash_left = budget - sum(held[r["sym"]] * r["entry"] for r in view["rows"])
+    account = sum(value.values()) + cash_left
+    target_w = min(1 / MOM_TOP, cfg["max_position_pct"] / 100)
+    target_amt = account * (1 - cfg["cash_buffer_pct"] / 100) * target_w
+    sells, buys = [], []
+    for s in view.get("next_out", []):
+        if held.get(s) and px(s):
+            sells.append({"sym": s, "qty": held[s], "price": px(s), "amount": round(held[s] * px(s), 2), "why": "drops out"})
+    for s in [x for x in view.get("next_top", []) if x in held]:
+        p = px(s)
+        if not p:
+            continue
+        drift = (value[s] - target_amt) / account * 100
+        if abs(drift) > cfg["band_pct"]:
+            q = int(abs(value[s] - target_amt) // p)
+            if q * p >= cfg["min_order"]:
+                (sells if drift > 0 else buys).append({"sym": s, "qty": q, "price": p, "amount": round(q * p, 2),
+                                                       "why": f"{drift:+.1f} pts off target"})
+    for s in view.get("next_in", []):
+        p = px(s)
+        if p:
+            q = int(target_amt // p)
+            if q * p >= cfg["min_order"]:
+                buys.append({"sym": s, "qty": q, "price": p, "amount": round(q * p, 2), "why": "new in"})
+    return {"start": start, "sells": sells, "buys": buys, "account": account, "target_amt": target_amt}
+
+
+# ── price alerts (the trader-alerts idea): ring once, to Telegram ──
+ALERTS_KEY = "__ALERTS__"
+
+
+def _alert_id(a):
+    kind = next((k for k in ("above", "below", "stop", "pct") if k in a), "?")
+    return f'{a["symbol"].upper()}|{kind}|{a.get(kind)}|{a.get("direction", "")}'
+
+
+def check_alerts(state, cfg, now_str):
+    """Check each rule in trading_config.json against this scan's prices.
+    above / below / stop ring once (again only after the price moves back, when
+    "rearm" is true); pct rings at most once a day. Returns the messages."""
+    rang = state.setdefault(ALERTS_KEY, {})
+    out = []
+    for a in cfg["alerts"]:
+        sym = a["symbol"].strip().upper()
+        info = state.get(sym) or state.get(INDEX_STATE_PREFIX + sym) or {}
+        price, chg = info.get("last_close"), info.get("day_chg_pct")
+        aid = _alert_id(a)
+        rec = rang.get(aid)
+        if price is None:
+            continue
+        note = f" — {html_lib.escape(a['note'])}" if a.get("note") else ""
+        label = f"{html_lib.escape(sym)} {_fmt_price(price) if sym not in INDEX_TICKERS else f'{price:,.2f}'}"
+        if "pct" in a:
+            want = a.get("direction", "either")
+            hit = chg is not None and abs(chg) >= float(a["pct"]) and (
+                want == "either" or (want == "up") == (chg > 0))
+            if hit and (not rec or rec["time"][:10] != now_str[:10]):
+                rang[aid] = {"time": now_str, "price": price}
+                out.append(f"🔔 <b>{label}</b>  {chg:+.2f}% today (alert at {float(a['pct']):g}%){note}")
+            continue
+        kind = "above" if "above" in a else ("below" if "below" in a else "stop")
+        level = float(a[kind])
+        crossed = price >= level if kind == "above" else price <= level
+        if crossed and not rec:
+            rang[aid] = {"time": now_str, "price": price}
+            word = {"above": "is above", "below": "is below", "stop": "hit your stop at"}[kind]
+            out.append(f"{'🛑' if kind == 'stop' else '🔔'} <b>{label}</b> {word} {level:,.2f}{note}")
+        elif rec and not crossed and a.get("rearm"):
+            del rang[aid]
+    live_ids = {_alert_id(a) for a in cfg["alerts"]}
+    for k in [k for k in rang if k not in live_ids]:
+        del rang[k]                    # rule removed from the config: forget it
+    return out
+
+
 def htf_at(htf, frame, ts):
     """Higher-timeframe trend (1 / -1, 0 if unknown) as of `ts` (tz-aware
     Timestamp), from the last candle of that frame that had closed by then."""
@@ -2357,16 +2590,30 @@ def scan_once(per_symbol_delay=None, backfill=False):
     state[SCAN_META_KEY] = {"time": now_str, "checked": checked, "total": len(universe), "sectors": sectors,
                             "universe": universe, "n100": n100}
 
+    # double confirmations completed by this scan's signals
+    new_conf = [c for c in find_confluence(state[SIGNAL_LOG_KEY]).get(now_str[:10], []) if c["time"] == now_str]
+    confirmed = [(c["name"], c["dir"], c["price"]) for c in new_conf]
+    cfg = load_trading_config()
+    alert_msgs = []
+    if not backfill:
+        try:
+            update_paper(state, [{**c, "bar": max(str(c["st"].get("bar") or c["st"]["time"]),
+                                                  str(c["adx"].get("bar") or c["adx"]["time"]))} for c in new_conf],
+                         now_str, cfg["paper"])
+        except Exception as e:  # noqa: BLE001 — the paper book must never break a scan
+            print(f"[warn] paper portfolio update failed: {e}")
+        try:
+            alert_msgs = check_alerts(state, cfg, now_str)
+        except Exception as e:  # noqa: BLE001
+            print(f"[warn] price alerts failed: {e}")
+
     save_state(state)
     save_bars_cache()
     write_dashboard(state)
     print(f"[{now_str}] checked {checked}/{len(universe)} stocks "
-          f"+ {len(INDEX_TICKERS)} indices, {len(fired)} new signal(s)")
-
-    # double confirmations completed by this scan's signals
-    confirmed = [(c["name"], c["dir"], c["price"])
-                 for c in find_confluence(state[SIGNAL_LOG_KEY]).get(now_str[:10], [])
-                 if c["time"] == now_str]
+          f"+ {len(INDEX_TICKERS)} indices, {len(fired)} new signal(s), {len(alert_msgs)} price alert(s)")
+    if alert_msgs and not send_telegram(chr(10).join(alert_msgs)) and TELEGRAM_TOKEN:
+        print("[warn] price alerts: Telegram send failed")
     if backfill:
         print("[backfill] archive now spans", len({h["time"][:10] for h in state.get(ARCHIVE_KEY, [])}), "sessions; no alerts sent")
         return
