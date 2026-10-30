@@ -1193,14 +1193,16 @@ background:var(--panel);color:var(--fg);cursor:pointer;padding:0}.iconbtn svg{wi
 .tabs::-webkit-scrollbar{display:none}
 .tab{appearance:none;border:0;background:none;color:var(--muted);font:inherit;font-weight:600;font-size:13px;
 padding:9px 12px 11px;border-bottom:2px solid transparent;cursor:pointer;white-space:nowrap}
-.tab:hover{color:var(--fg)}.tab.on{color:var(--fg);border-bottom-color:var(--fg)}
+.tab{display:inline-flex;align-items:center;gap:6px}.tab svg{width:14px;height:14px;opacity:.7}
+.tab:hover{color:var(--fg)}.tab.on{color:var(--fg);border-bottom-color:var(--accent)}.tab.on svg{opacity:1;color:var(--accent)}
 .tab .n{margin-left:6px;font-size:11px;font-weight:600;color:var(--muted);background:var(--hover);
 padding:1px 6px;border-radius:999px}
 /* layout */
 main{padding:20px 0 40px}.view{display:none}.view.on{display:block}
 section{margin-bottom:26px}
 .sh{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin:0 0 10px;flex-wrap:wrap}
-.sh h2{font-size:15px;margin:0;letter-spacing:-.01em}.sh .meta{font-size:12px;color:var(--muted)}
+.sh h2{font-size:15px;margin:0;letter-spacing:-.01em;display:flex;align-items:center;gap:8px}
+.sh h2::before{content:"";width:3px;height:15px;border-radius:2px;background:var(--accent);flex:none}.sh .meta{font-size:12px;color:var(--muted)}
 .note{font-size:12px;color:var(--muted);margin:-4px 0 12px;max-width:820px}
 .note.below{margin:14px 0 0;max-width:1100px;line-height:1.6}
 details.note>summary{cursor:pointer;font-weight:600;width:max-content;max-width:100%}
@@ -1215,7 +1217,8 @@ font:inherit;font-size:12px;font-weight:700;cursor:pointer}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow)}
 /* index strip */
 .idx{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:22px}
-.ix{padding:11px 13px;min-width:0}
+.ix{padding:11px 13px;min-width:0;border-left:3px solid var(--line)}
+.ix.up{border-left-color:var(--up)}.ix.dn{border-left-color:var(--dn)}
 .ix .nm{font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.03em;white-space:nowrap;
 overflow:hidden;text-overflow:ellipsis}
 .ix .px{font-size:17px;font-weight:700;letter-spacing:-.01em;margin:3px 0 1px}
@@ -1225,7 +1228,8 @@ overflow:hidden;text-overflow:ellipsis}
 .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:26px}
 .kpis.k3{grid-template-columns:repeat(3,1fr);margin-top:-16px}
 .kpis.k5{grid-template-columns:repeat(5,1fr)}
-.kpi{padding:13px 15px}.kpi .k{font-size:12px;color:var(--muted);font-weight:500}
+.kpi{padding:13px 15px;transition:transform .15s,box-shadow .15s}
+.kpi:hover{transform:translateY(-1px);box-shadow:0 4px 14px rgba(15,23,42,.08)}.kpi .k{font-size:12px;color:var(--muted);font-weight:500}
 .kpi .v{font-size:24px;font-weight:700;letter-spacing:-.02em;margin:2px 0}
 .kpi .s{font-size:12px;color:var(--muted)}
 .split{display:flex;height:4px;border-radius:2px;overflow:hidden;background:var(--line);margin-top:9px}
@@ -1279,9 +1283,17 @@ a.tv{color:inherit;text-decoration:none}a.tv:hover{text-decoration:underline;col
 .star.on{color:#f59e0b}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}.grid2 section{margin:0}
 tr.secrow{cursor:pointer}tr.secrow.on td{background:var(--accent-bg)}
-#eq svg{display:block;width:100%;height:220px}#eq .lg{display:flex;gap:16px;font-size:12px;color:var(--muted);margin-bottom:6px}
+#eq svg{display:block;width:100%;height:220px}
+svg.spark{display:block;width:100%;height:160px}
+.rules{padding:13px 16px;font-size:13px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;background:var(--hover);
+font-size:12px;font-weight:600;color:var(--fg);border:1px solid var(--line)}
+tfoot td{background:var(--head);font-weight:600;border-top:1px solid var(--line);border-bottom:0}
+code{font:12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--hover);padding:1px 5px;border-radius:5px}#eq .lg{display:flex;gap:16px;font-size:12px;color:var(--muted);margin-bottom:6px}
 #eq .lg i{display:inline-block;width:14px;height:3px;border-radius:2px;vertical-align:middle;margin-right:6px}
-@media (max-width:980px){.grid2{grid-template-columns:1fr}.kpis.k5{grid-template-columns:repeat(3,1fr)}}
+@media (max-width:1180px){.grid2{grid-template-columns:1fr}}
+@media (max-width:980px){.kpis.k5{grid-template-columns:repeat(3,1fr)}}
 .foot{font-size:12px;color:var(--faint);padding:14px 0 0;border-top:1px solid var(--line);line-height:1.6}
 @media (max-width:1100px){.hide-md{display:none}}
 @media (max-width:980px){.idx{grid-template-columns:repeat(3,1fr)}}
@@ -1775,6 +1787,7 @@ def _momentum_view_html(state, sectors):
 <div class="kpis">{kpis}</div>
 <section><div class="sh"><h2>Holdings — {e(mon(v["month"]))}</h2><span class="meta">bought at the open on {e(fmt_day(v["start"]))} · turnover {v["turnover"] * 100:.0f}% · costs included</span></div>
 {tbl('<th class="r">#</th><th>Stock</th><th class="hide-md">Sector</th><th class="r">12-1 momentum</th><th class="r">Entry</th><th class="r">Now</th><th class="r">Month to date</th><th>Daily trend</th><th>Next month</th>', hold, "")}</section>
+{_momentum_orders_html(v, state, load_trading_config()["momentum"])}
 <div class="grid2"><section><div class="sh"><h2>Next month — {e(mon(v["next_month"]))}</h2><span class="meta">ranking ends a month back, so this list is already fixed</span></div>
 <div class="panel" style="padding:14px 16px;font-size:13px;line-height:2"><b>Coming in:</b> {chips(v["next_in"], "up")}<br>
 <b>Going out:</b> {chips(v["next_out"], "dn")}</div>
@@ -1791,6 +1804,183 @@ Nifty 200 by about 2.7 points a year, against ~19–23 in the backtests. This ta
 Paper tracking only — not a recommendation; speak to a SEBI-registered adviser before investing.</details>"""
 
 
+def _inr(v, sign=False, dec=0):
+    """Rupees with Indian digit grouping: ₹2,00,000 / −₹1,234."""
+    if v is None:
+        return '<span class="fa">—</span>'
+    neg = v < 0
+    s = f"{abs(v):.{dec}f}"
+    whole, _, frac = s.partition(".")
+    if len(whole) > 3:
+        head, tail = whole[:-3], whole[-3:]
+        head = ",".join([head[max(i - 2, 0):i] for i in range(len(head), 0, -2)][::-1])
+        whole = f"{head},{tail}"
+    txt = f"₹{whole}{'.' + frac if frac else ''}"
+    if sign:
+        cls = "up" if v > 0 else ("dn" if neg else "mu")
+        return f'<span class="{cls}">{"−" if neg else ("+" if v > 0 else "")}{txt}</span>'
+    return f"−{txt}" if neg else txt
+
+
+def _spark(values, w=1000, h=160):
+    """Inline SVG line of a running total (e.g. cumulative paper P&L)."""
+    if len(values) < 2:
+        return '<div class="empty">The curve appears after two closed trades.</div>'
+    lo, hi = min(0, *values), max(0, *values)
+    X = lambda i: 6 + i * (w - 12) / (len(values) - 1)  # noqa: E731
+    Y = lambda v: h - 6 - (v - lo) * (h - 12) / ((hi - lo) or 1)  # noqa: E731
+    pts = " ".join(f"{X(i):.1f},{Y(v):.1f}" for i, v in enumerate(values))
+    col = "var(--up)" if values[-1] >= 0 else "var(--dn)"
+    return (f'<svg class="spark" viewBox="0 0 {w} {h}" preserveAspectRatio="none">'
+            f'<line x1="0" x2="{w}" y1="{Y(0):.1f}" y2="{Y(0):.1f}" stroke="var(--line)" stroke-dasharray="4 4" vector-effect="non-scaling-stroke"/>'
+            f'<polyline fill="none" stroke="{col}" stroke-width="2" vector-effect="non-scaling-stroke" points="{pts}"/></svg>')
+
+
+CONFIG_EDIT_URL = "https://github.com/JayMehta-gif/nifty150-live-signals/edit/main/trading_config.json"
+
+
+def _paper_view_html(state, cfg):
+    """Paper trades tab: the forward test of double confirmations under risk limits."""
+    e = html_lib.escape
+    p = state.get(PAPER_KEY) or {}
+    trades = p.get("trades", [])
+    cap = cfg["capital"]
+    closed = [t for t in trades if t["status"] == "closed"]
+    opened = [t for t in trades if t["status"] == "open"]
+    realised = sum(t["pnl"] for t in closed)
+
+    def unreal(t):
+        now = _current_price(state, t["sym"])
+        return ((now - t["entry"]) * t["qty"] * (1 if t["dir"] == "buy" else -1)) if now else 0.0
+    unrealised = sum(unreal(t) for t in opened)
+    equity = cap + realised + unrealised
+    wins = [t for t in closed if t["pnl"] > 0]
+    day = (state.get(SCAN_META_KEY) or {}).get("time", "")[:10]
+    today_n = sum(1 for t in trades if t["day"] == day)
+    blocked = p.get("skipped", [])
+    blocked_today = sum(1 for b in blocked if b["time"][:10] == day)
+    since = p.get("since")
+    kpis = (
+        f'<div class="panel kpi"><div class="k">Paper equity</div><div class="v">{_inr(equity)}</div>'
+        f'<div class="s">{_pct((equity / cap - 1) * 100)} on {_inr(cap)} capital</div></div>'
+        f'<div class="panel kpi"><div class="k">Realised P&amp;L</div><div class="v">{_inr(realised, sign=True)}</div>'
+        f'<div class="s">{len(closed)} closed trades · after costs</div></div>'
+        f'<div class="panel kpi"><div class="k">Win rate</div><div class="v">{(len(wins) / len(closed) * 100 if closed else 0):.0f}%</div>'
+        f'<div class="s">avg {_pct(sum(t["pnl_pct"] for t in closed) / len(closed)) if closed else "—"} per trade</div></div>'
+        f'<div class="panel kpi"><div class="k">Open now</div><div class="v">{len(opened)}<span class="mu" style="font-size:14px"> / {cfg["max_open"]}</span></div>'
+        f'<div class="s">unrealised {_inr(unrealised, sign=True)}</div></div>'
+        f'<div class="panel kpi"><div class="k">Today</div><div class="v">{today_n}<span class="mu" style="font-size:14px"> / {cfg["max_trades_per_day"]}</span></div>'
+        f'<div class="s">{blocked_today} blocked by the risk rules</div></div>')
+    open_rows = "".join(
+        f'<tr><td>{_tv(t["sym"])}</td><td>{_tag("BUY" if t["dir"] == "buy" else "SELL")}</td>'
+        f'<td class="mu">{e(fmt_time(t["bar"]))}</td><td class="r">{t["qty"]}</td><td class="r">{_fmt_price(t["entry"])}</td>'
+        f'<td class="r up">{_fmt_price(t["target"])}</td><td class="r dn">{_fmt_price(t["stop"])}</td>'
+        f'<td class="r">{_fmt_price(_current_price(state, t["sym"]))}</td><td class="r">{_inr(unreal(t), sign=True)}</td></tr>'
+        for t in sorted(opened, key=lambda x: x["bar"], reverse=True))
+    reason_tag = {"target": ("TARGET", "up"), "stop": ("STOP", "dn"), "flip": ("FLIP", "mute"), "square-off": ("3:15 CLOSE", "mute")}
+    closed_rows = "".join(
+        f'<tr><td class="mu">{e(fmt_day(t["day"]))}</td><td>{_tv(t["sym"])}</td><td>{_tag("BUY" if t["dir"] == "buy" else "SELL")}</td>'
+        f'<td class="r">{t["qty"]}</td><td class="r">{_fmt_price(t["entry"])} <span class="sm">{e(fmt_time(t["bar"]))}</span></td>'
+        f'<td class="r">{_fmt_price(t["exit"])} <span class="sm">{e(fmt_time(t["exit_bar"]))}</span></td>'
+        f'<td>{_tag(*reason_tag.get(t["reason"], (t["reason"].upper(), "mute")))}</td>'
+        f'<td class="r">{_inr(t["pnl"], sign=True)}</td><td class="r">{_pct(t["pnl_pct"])}</td></tr>'
+        for t in sorted(closed, key=lambda x: x["exit_bar"], reverse=True)[:150])
+    by_reason = {}
+    for t in closed:
+        by_reason.setdefault(t["reason"], []).append(t["pnl"])
+    reason_chips = " ".join(
+        f'<span class="chip">{_tag(*reason_tag.get(r, (r.upper(), "mute")))} {len(v)} · {_inr(sum(v), sign=True)}</span>'
+        for r, v in sorted(by_reason.items(), key=lambda kv: -len(kv[1]))) or '<span class="fa">No closed trades yet.</span>'
+    block_rows = "".join(
+        f'<tr><td class="mu">{e(fmt_stamp(b["time"]))}</td><td>{_tv(b["sym"])}</td><td>{_tag("BUY" if b["dir"] == "buy" else "SELL")}</td>'
+        f'<td class="r">{_fmt_price(b["price"])}</td><td>{e(b["reason"])}</td></tr>' for b in blocked[::-1][:40])
+    curve, run = [], 0.0
+    for t in sorted(closed, key=lambda x: x["exit_bar"]):
+        run += t["pnl"]
+        curve.append(run)
+    rules = [f"{_inr(cfg['per_trade'])} a trade (whole shares)", f"+{cfg['target_pct']:g}% target", f"−{cfg['stop_pct']:g}% stop",
+             f"entries {cfg['window'][0]}–{cfg['window'][1]}", "closes by 3:15 PM", f"max {cfg['max_open']} open",
+             f"max {cfg['max_trades_per_day']} a day", f"stop for the day at −{cfg['daily_loss_limit_pct']:g}%",
+             f"{cfg['cash_buffer_pct']:g}% cash kept", f"{cfg['cost_pct']:g}% costs a trade"]
+
+    def tbl(head, rows, empty):
+        return (f'<div class="panel tw"><table><thead><tr>{head}</tr></thead><tbody>'
+                f'{rows or f"<tr><td colspan=10 class=empty>{empty}</td></tr>"}</tbody></table></div>')
+    return f"""<div class="sh"><h2>Paper trades</h2><span class="meta">forward test since {e(fmt_day(since)) if since else "the next scan"} · nothing is really bought or sold</span></div>
+<div class="panel rules"><b>The rule being tested:</b> every double confirmation (SuperTrend + ADX DI) on a Nifty 100 stock, traded intraday.
+<div class="chips">{"".join(f'<span class="chip">{e(r)}</span>' for r in rules)}</div>
+<div class="sm" style="margin-top:6px">Change these in <a class="tv" href="{CONFIG_EDIT_URL}" target="_blank" rel="noopener">trading_config.json</a>.
+This was the only setup above zero on unseen data (+0.06–0.08% a trade): this tab checks whether that holds going forward.</div></div>
+<div class="kpis k5" style="margin-top:14px">{kpis}</div>
+<div class="grid2"><section><div class="sh"><h2>Running P&amp;L</h2><span class="meta">closed trades, after costs</span></div>
+<div class="panel" style="padding:12px 14px">{_spark(curve)}</div></section>
+<section><div class="sh"><h2>How trades ended</h2><span class="meta">count · P&amp;L</span></div>
+<div class="panel" style="padding:14px 16px"><div class="chips">{reason_chips}</div></div></section></div>
+<section style="margin-top:22px"><div class="sh"><h2>Open positions</h2><span class="meta">{len(opened)} open</span></div>
+{tbl('<th>Stock</th><th>Side</th><th>Entered</th><th class="r">Qty</th><th class="r">Entry</th><th class="r">Target</th><th class="r">Stop</th><th class="r">Now</th><th class="r">P&amp;L</th>', open_rows, "No open paper positions.")}</section>
+<section><div class="sh"><h2>Closed trades</h2><span class="meta">latest {min(len(closed), 150)} of {len(closed)}</span></div>
+{tbl('<th>Day</th><th>Stock</th><th>Side</th><th class="r">Qty</th><th class="r">Entry</th><th class="r">Exit</th><th>Why</th><th class="r">P&amp;L</th><th class="r">%</th>', closed_rows, "No closed paper trades yet — the first ones appear after the next double confirmation.")}</section>
+<details class="more"><summary>Blocked by the risk rules <span class="mu">{len(blocked)}</span></summary>
+<div style="margin-top:12px">{tbl('<th>When</th><th>Stock</th><th>Side</th><th class="r">Price</th><th>Reason</th>', block_rows, "Nothing blocked yet.")}</div></details>"""
+
+
+def _momentum_orders_html(view, state, cfg):
+    """Momentum tab: whole-share orders for the user's budget."""
+    try:
+        o = momentum_orders(view, state, cfg)
+    except Exception as ex:  # noqa: BLE001
+        return f'<div class="panel empty">Orders unavailable ({html_lib.escape(str(ex))}).</div>'
+    mon = lambda m: pd.Period(m, "M").strftime("%b %Y")  # noqa: E731
+    start_rows = "".join(
+        f'<tr><td>{_tv(r["sym"])}</td><td class="r">{_fmt_price(r["price"])}</td><td class="r"><b>{r["qty"]}</b></td><td class="r">{_inr(r["amount"])}</td></tr>'
+        for r in o["start"])
+    invested = sum(r["amount"] for r in o["start"])
+
+    def order_rows(rows, side):
+        return "".join(
+            f'<tr><td>{_tag(side, "dn" if side == "SELL" else "up")}</td><td>{_tv(r["sym"])}</td><td class="r"><b>{r["qty"]}</b></td>'
+            f'<td class="r">{_fmt_price(r["price"])}</td><td class="r">{_inr(r["amount"])}</td><td class="mu">{html_lib.escape(r["why"])}</td></tr>'
+            for r in rows)
+    reb = order_rows(o["sells"], "SELL") + order_rows(o["buys"], "BUY")
+    return f"""<div class="grid2" style="margin-bottom:22px"><section><div class="sh"><h2>Start now with {_inr(cfg['budget'])}</h2>
+<span class="meta">{mon(view["month"])} portfolio at today's prices · whole shares</span></div>
+<div class="panel tw"><table><thead><tr><th>Stock</th><th class="r">Price</th><th class="r">Shares</th><th class="r">Amount</th></tr></thead>
+<tbody>{start_rows}</tbody><tfoot><tr><td colspan="3">Invested · cash left</td><td class="r"><b>{_inr(invested)}</b> · {_inr(cfg['budget'] - invested)}</td></tr></tfoot></table></div></section>
+<section><div class="sh"><h2>Next rebalance — {mon(view["next_month"])}</h2><span class="meta">if you hold this month's list · sells first</span></div>
+<div class="panel tw"><table><thead><tr><th>Order</th><th>Stock</th><th class="r">Shares</th><th class="r">Price now</th><th class="r">Amount</th><th>Why</th></tr></thead>
+<tbody>{reb or '<tr><td colspan="6" class="empty">No trades needed — every stock stays and none drifted past the band.</td></tr>'}</tbody></table></div>
+<p class="note below">Placed at the first open of {mon(view["next_month"])}; share counts use today's prices, so check them that morning.
+Stocks that stay are only resized if they drift more than {cfg['band_pct']:g} points; orders under {_inr(cfg['min_order'])} are skipped.
+Budget, cash buffer ({cfg['cash_buffer_pct']:g}%) and per-stock cap ({cfg['max_position_pct']:g}%) are set in
+<a class="tv" href="{CONFIG_EDIT_URL}" target="_blank" rel="noopener">trading_config.json</a>. Nothing is ever placed for you.</p></section></div>"""
+
+
+def _alerts_html(state, cfg):
+    """Live tab: the user's price alerts and whether each has rung."""
+    e = html_lib.escape
+    rang = state.get(ALERTS_KEY) or {}
+    rows = []
+    for a in cfg["alerts"]:
+        sym = a["symbol"].strip().upper()
+        info = state.get(sym) or state.get(INDEX_STATE_PREFIX + sym) or {}
+        kind = next((k for k in ("above", "below", "stop", "pct") if k in a), "?")
+        rule = (f'moves {float(a["pct"]):g}% {a.get("direction", "either way") if a.get("direction") in ("up", "down") else "either way"}'
+                if kind == "pct" else f'{kind} {float(a[kind]):,.2f}')
+        rec = rang.get(_alert_id(a))
+        status = (f'<span class="tag ok">rang {e(fmt_stamp(rec["time"]))}</span>' if rec
+                  else ('<span class="tag mute">unknown symbol</span>' if not info else '<span class="tag mute">waiting</span>'))
+        rows.append(f'<tr><td>{_tv(sym)}</td><td>{e(rule)}</td><td class="r">{_fmt_price(info.get("last_close"))}</td>'
+                    f'<td class="r">{_pct(info.get("day_chg_pct"))}</td><td>{status}</td><td class="mu">{e(a.get("note", ""))}</td></tr>')
+    body = "".join(rows) or (f'<tr><td colspan="6" class="empty">No price alerts yet. Add rules such as '
+                             f'<code>{{"symbol": "RELIANCE", "above": 1500}}</code> to the <code>alerts</code> list in '
+                             f'<a class="tv" href="{CONFIG_EDIT_URL}" target="_blank" rel="noopener">trading_config.json</a> — '
+                             f'each rings once on Telegram.</td></tr>')
+    return (f'<section><div class="sh"><h2>Your price alerts</h2><span class="meta">{len(cfg["alerts"])} rules · '
+            f'<a class="tv" href="{CONFIG_EDIT_URL}" target="_blank" rel="noopener">edit</a></span></div>'
+            f'<div class="panel tw"><table><thead><tr><th>Stock</th><th>Rule</th><th class="r">Now</th><th class="r">Day</th>'
+            f'<th>Status</th><th>Note</th></tr></thead><tbody>{body}</tbody></table></div></section>')
+
+
 def write_dashboard(state):
     """Render dashboard.html from the state file — a static page with four tabs:
     Live (indices, today's confirmations and signals), Past signals (day-wise
@@ -1803,6 +1993,8 @@ def write_dashboard(state):
     stocks = {s: state[s] for s in universe if s in state}
     log = state.get(SIGNAL_LOG_KEY, [])
     archive = [h for h in state.get(ARCHIVE_KEY, []) if not h["strategy"].startswith("EMA_")]
+    tcfg = load_trading_config()
+    n_paper_open = sum(1 for t in (state.get(PAPER_KEY) or {}).get("trades", []) if t["status"] == "open")
     n100 = meta.get("n100") or (sorted(pd.read_csv(NIFTY100_FALLBACK)["Symbol"].str.strip())
                                 if NIFTY100_FALLBACK.exists() else [])
 
@@ -1819,7 +2011,8 @@ def write_dashboard(state):
         dist = info.get("distance_pct")
         dist_txt = e(f"{dist:.2f}% to flip") if dist is not None else ""
         ix_html.append(
-            f'<div class="panel ix"><div class="nm" title="{e(name)}">{_tv(name, "")}</div>'
+            f'<div class="panel ix {"up" if (info.get("day_chg_pct") or 0) > 0 else ("dn" if (info.get("day_chg_pct") or 0) < 0 else "")}">'
+            f'<div class="nm" title="{e(name)}">{_tv(name, "")}</div>'
             f'<div class="px">{_fmt_price(info.get("last_close"))}</div>'
             f'<div class="ft">{_pct(info.get("day_chg_pct"))}'
             f'<span class="sm">{dist_txt}</span></div>'
@@ -2108,11 +2301,12 @@ stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
 <svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
 <circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
 </button></div></div>
-<nav class="tabs"><button class="tab" data-v="live">Live</button>
-<button class="tab" data-v="past">Past signals</button>
-<button class="tab" data-v="accuracy">Accuracy</button>
-<button class="tab" data-v="momentum">Momentum</button>
-<button class="tab" data-v="stocks">Stocks<span class="n">{len(stocks)}</span></button></nav>
+<nav class="tabs"><button class="tab" data-v="live"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8"/></svg>Live</button>
+<button class="tab" data-v="paper"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5M4 19h16M8 15l4-4 3 3 5-6"/></svg>Paper trades{f'<span class="n">{n_paper_open}</span>' if n_paper_open else ""}</button>
+<button class="tab" data-v="past"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Past signals</button>
+<button class="tab" data-v="accuracy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/></svg>Accuracy</button>
+<button class="tab" data-v="momentum"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>Momentum</button>
+<button class="tab" data-v="stocks"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>Stocks<span class="n">{len(stocks)}</span></button></nav>
 </div></div>
 
 <main class="wrap">
@@ -2127,6 +2321,7 @@ stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
 <p class="note">EMA50 crossing EMA100 (early cross) or EMA200 (golden / death cross) on daily candles — the TradingView "EMA 50, 100 and 200" indicator.</p>
 {table("t-dx", '<th>Stock</th><th title="EMA50 crossing EMA100 — latest cross in the window">EMA 50×100 (early)</th><th title="EMA50 crossing EMA200 — latest cross in the window">EMA 50×200 (golden / death)</th><th class="r">Now</th><th class="hide-sm">Daily trend</th>',
        cross_rows, "No daily EMA crosses in this window.")}</section>
+{_alerts_html(state, tcfg)}
 <details class="more"><summary>All signals today <span class="mu" id="c-live"></span></summary>
 <div class="tb" style="margin:12px 0"><div class="seg" id="f-live-dir"><button class="on" data-f="all">All</button>
 <button data-f="buy">Buy</button><button data-f="sell">Sell</button></div></div>
@@ -2208,6 +2403,10 @@ where many signals are still open, where closed-only figures understate them. Bu
 <b>Simulator</b>: a trade exits at the target or stop, whichever price reaches first (if both are touched in the same 15-min candle
 it assumes the stop — the cautious choice); otherwise at the flip. Open signals that haven't hit either level aren't counted.
 Ignores brokerage, taxes and slippage. <b>Focus</b> (top right) applies here too.</details>
+</div>
+
+<div class="view" id="v-paper">
+{_paper_view_html(state, tcfg["paper"])}
 </div>
 
 <div class="view" id="v-momentum">
