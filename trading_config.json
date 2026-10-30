@@ -7,7 +7,7 @@
     "per_trade": 20000,
     "max_open": 8,
     "max_trades_per_day": 10,
-    "min_traded_cr": 100,
+    "min_traded_cr": 1,
     "daily_loss_limit_pct": 2,
     "cash_buffer_pct": 10,
     "target_pct": 3,

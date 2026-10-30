@@ -712,7 +712,7 @@ def update_momentum(state, universe):
 
 CONFIG_FILE = Path(__file__).parent / "trading_config.json"
 CONFIG_DEFAULTS = {
-    "paper": {"capital": 200000, "per_trade": 20000, "max_open": 8, "max_trades_per_day": 10, "min_traded_cr": 100,
+    "paper": {"capital": 200000, "per_trade": 20000, "max_open": 8, "max_trades_per_day": 10, "min_traded_cr": 1,
               "daily_loss_limit_pct": 2, "cash_buffer_pct": 10, "target_pct": 3, "stop_pct": 2,
               "window": ["09:45", "14:30"], "square_off": "15:00", "cost_pct": 0.122},
     "momentum": {"budget": 200000, "cash_buffer_pct": 5, "max_position_pct": 10, "band_pct": 2, "min_order": 1000},
