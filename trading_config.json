@@ -2,11 +2,12 @@
   "_help": "Edit this file on GitHub (pencil icon) to change the paper portfolio rules, your momentum budget and your price alerts. Amounts are in rupees. The next scan picks up the change.",
 
   "paper": {
-    "_help": "Paper portfolio: takes every double confirmation (SuperTrend + ADX DI) on Nifty 100 stocks inside the time window, as an intraday trade. Exits at the target, the stop, the first flip of either strategy, or the 3:15 PM square-off. Nothing is ever really bought or sold.",
+    "_help": "Paper portfolio: takes every double confirmation (SuperTrend + ADX DI) on Nifty 100 stocks inside the time window, as an intraday trade. Only stocks trading over min_traded_cr (₹ crore a day, 20-day average). Two books run side by side: all such confirmations, and only those that trade with the market (buys when NIFTY is above its 20-day EMA, sells when below). Exits at the target, the stop, the first flip of either strategy, or the 3:15 PM square-off. Nothing is ever really bought or sold.",
     "capital": 200000,
     "per_trade": 20000,
     "max_open": 8,
     "max_trades_per_day": 10,
+    "min_traded_cr": 100,
     "daily_loss_limit_pct": 2,
     "cash_buffer_pct": 10,
     "target_pct": 3,

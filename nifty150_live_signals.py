@@ -548,9 +548,13 @@ def daily_ema_trend(symbol, yf_ticker, df15):
             if k >= len(px) - DAILY_CROSS_DAYS:
                 dx.append({"k": "EMA_EARLY" if kind == 0 else "EMA_GOLDEN", "d": d, "date": str(days[k]),
                            "px": round(float(px[k]), 2), "f": int(k == len(px) - 1 and last_open)})
+    done = hist[hist.index.date < last_day]
+    tv20 = float((done["close"] * done["volume"]).iloc[-20:].mean() / 1e7) if "volume" in done else None
+    above20 = bool(closes.iloc[-1] > closes.ewm(span=20, adjust=False).mean().iloc[-1])
     return {"gc": gc, "gc_date": gc_date, "gc_days": gc_days, "ec": ec, "ec_date": ec_date,
             "ec_days": ec_days, "ema200_dist": round(float((c.iloc[-1] / e200[-1] - 1) * 100), 2),
-            "dx": dx, "dxs": dxs}
+            "dx": dx, "dxs": dxs, "tv20": round(tv20, 1) if tv20 is not None else None,
+            "above20": above20}   # tv20 = ₹ crore traded a day (20 sessions); above20 = last close above its 20-day EMA
 
 
 def daily_cross_alerts(name, prev, cur):
@@ -708,7 +712,7 @@ def update_momentum(state, universe):
 
 CONFIG_FILE = Path(__file__).parent / "trading_config.json"
 CONFIG_DEFAULTS = {
-    "paper": {"capital": 200000, "per_trade": 20000, "max_open": 8, "max_trades_per_day": 10,
+    "paper": {"capital": 200000, "per_trade": 20000, "max_open": 8, "max_trades_per_day": 10, "min_traded_cr": 100,
               "daily_loss_limit_pct": 2, "cash_buffer_pct": 10, "target_pct": 3, "stop_pct": 2,
               "window": ["09:45", "14:30"], "square_off": "15:00", "cost_pct": 0.122},
     "momentum": {"budget": 200000, "cash_buffer_pct": 5, "max_position_pct": 10, "band_pct": 2, "min_order": 1000},
@@ -773,13 +777,26 @@ def _paper_exit(t, archive, cfg):
     return None
 
 
-def update_paper(state, confirmed, now_str, cfg):
+PAPER_MKT_KEY = "__PAPER_MKT__"   # second book: same rules + "trade with the market"
+
+
+def market_up(state):
+    """NIFTY 50's last completed close above its 20-day EMA (None if unknown)."""
+    return (state.get(INDEX_STATE_PREFIX + "NIFTY 50") or {}).get("above20")
+
+
+def with_market(state, direction):
+    up = market_up(state)
+    return up is not None and up == (direction == "buy")
+
+
+def update_paper(state, confirmed, now_str, cfg, key=PAPER_KEY, market_filter=False):
     """Forward paper test of the one setup that was above zero out of sample:
     double confirmations, intraday, +target / −stop. New entries pass a risk gate
     (the trader-risk idea): duplicates, max open positions, max trades a day, the
     daily loss limit and the cash buffer; anything blocked is logged with the
     reason. Whole shares; costs charged on every round trip."""
-    p = state.setdefault(PAPER_KEY, {"since": now_str[:10], "trades": [], "skipped": []})
+    p = state.setdefault(key, {"since": now_str[:10], "trades": [], "skipped": []})
     archive = state.get(ARCHIVE_KEY, [])
     n100 = set(state.get(SCAN_META_KEY, {}).get("n100") or [])
     trades = p["trades"]
@@ -805,6 +822,11 @@ def update_paper(state, confirmed, now_str, cfg):
         name, direction, price, bar = c["name"], c["dir"], float(c["price"]), str(c["bar"])[:19]
         if name not in n100 or not (cfg["window"][0] <= bar[11:16] < cfg["window"][1]):
             continue  # outside the paper universe / time window: not a candidate at all
+        tv = (state.get(name) or {}).get("tv20")
+        if tv is not None and tv < cfg.get("min_traded_cr", 0):
+            continue  # not liquid enough
+        if market_filter and not with_market(state, direction):
+            continue  # against the market (NIFTY vs its 20-day EMA)
         today_trades = [t for t in trades if t["day"] == day]
         qty = int(cfg["per_trade"] // price) if price > 0 else 0
         loss_today = sum(t["pnl"] for t in closed_today)
@@ -1285,6 +1307,9 @@ a.tv{color:inherit;text-decoration:none}a.tv:hover{text-decoration:underline;col
 tr.secrow{cursor:pointer}tr.secrow.on td{background:var(--accent-bg)}
 #eq svg{display:block;width:100%;height:220px}
 svg.spark{display:block;width:100%;height:160px}
+.mkt{font-size:13px;padding:9px 13px;border-radius:10px;margin:0 0 10px;border:1px solid var(--line);background:var(--panel)}
+.mkt.up{border-left:3px solid var(--up)}.mkt.dn{border-left:3px solid var(--dn)}
+.book[hidden]{display:none}
 .rules{padding:13px 16px;font-size:13px}
 .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .chip{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;background:var(--hover);
@@ -1517,6 +1542,7 @@ const accSel=$('#f-acc-sym');
 accSel.onchange=()=>{renderAcc(accSel.value);try{localStorage.setItem('accsym',accSel.value)}catch(e){}};
 try{const v=localStorage.getItem('accsym');if(v&&[...accSel.options].some(o=>o.value===v))accSel.value=v}catch(e){}
 renderAcc(accSel.value);
+const fbk=$('#f-book');if(fbk)seg(fbk,v=>$$('.book').forEach(b=>b.hidden=b.dataset.book!==v));
 const stk=filterer('#t-stocks tbody','#c-stocks');seg($('#f-stk-view'),v=>stk.set('view',v));stk.set('view','today');
 const secSel=$('#f-stk-sector');secSel.onchange=()=>{stk.set('sector',secSel.value);
  $$('tr.secrow').forEach(r=>r.classList.toggle('on',r.dataset.sec===secSel.value))};
@@ -1839,10 +1865,63 @@ def _spark(values, w=1000, h=160):
 CONFIG_EDIT_URL = "https://github.com/JayMehta-gif/nifty150-live-signals/edit/main/trading_config.json"
 
 
-def _paper_view_html(state, cfg):
-    """Paper trades tab: the forward test of double confirmations under risk limits."""
+def _paper_stats(state, key, cfg):
+    p = state.get(key) or {}
+    trades = p.get("trades", [])
+    closed = [t for t in trades if t["status"] == "closed"]
+    opened = [t for t in trades if t["status"] == "open"]
+    unreal = 0.0
+    for t in opened:
+        now = _current_price(state, t["sym"])
+        unreal += ((now - t["entry"]) * t["qty"] * (1 if t["dir"] == "buy" else -1)) if now else 0.0
+    realised = sum(t["pnl"] for t in closed)
+    return {"n": len(closed), "open": len(opened), "realised": realised, "unreal": unreal,
+            "equity": cfg["capital"] + realised + unreal,
+            "win": (sum(t["pnl"] > 0 for t in closed) / len(closed) * 100) if closed else None,
+            "avg": (sum(t["pnl_pct"] for t in closed) / len(closed)) if closed else None, "since": p.get("since")}
+
+
+PAPER_BOOKS = ((PAPER_KEY, "A", "All confirmations", "every double confirmation that passes the universe, window and liquidity rules"),
+               (PAPER_MKT_KEY, "B", "With the market", "the same, but buys only when NIFTY is above its 20-day EMA and sells only when below"))
+
+
+def _paper_tab_html(state, cfg):
+    """Paper trades tab: two books side by side (with / without the market filter)."""
     e = html_lib.escape
-    p = state.get(PAPER_KEY) or {}
+    up = market_up(state)
+    since = min([x for x in ((state.get(k) or {}).get("since") for k, *_ in PAPER_BOOKS) if x] or [""])
+    rules = [f"{_inr(cfg['per_trade'])} a trade (whole shares)", f"+{cfg['target_pct']:g}% target", f"−{cfg['stop_pct']:g}% stop",
+             f"entries {cfg['window'][0]}–{cfg['window'][1]}", "closes by 3:15 PM", f"over ₹{cfg.get('min_traded_cr', 0):g} cr traded a day",
+             f"max {cfg['max_open']} open", f"max {cfg['max_trades_per_day']} a day",
+             f"stop for the day at −{cfg['daily_loss_limit_pct']:g}%", f"{cfg['cash_buffer_pct']:g}% cash kept", f"{cfg['cost_pct']:g}% costs a trade"]
+    comp = ""
+    for key, bid, title, desc in PAPER_BOOKS:
+        st = _paper_stats(state, key, cfg)
+        win = "—" if st["win"] is None else f'{st["win"]:.0f}%'
+        comp += (f'<tr><td><span class="tag ok">{bid}</span> <b>{e(title)}</b><div class="sm hide-sm">{e(desc)}</div></td>'
+                 f'<td class="r">{st["n"]}</td><td class="r">{win}</td>'
+                 f'<td class="r">{_pct(st["avg"])}</td><td class="r hide-sm">{_inr(st["realised"], sign=True)}</td><td class="r hide-md">{st["open"]}</td>'
+                 f'<td class="r"><b>{_inr(st["equity"])}</b></td></tr>')
+    books = "".join(f'<div class="book" data-book="{bid}"{"" if bid == "A" else " hidden"}>{_paper_view_html(state, cfg, key)}</div>'
+                    for key, bid, *_ in PAPER_BOOKS)
+    mk = ("unknown" if up is None else ("NIFTY is <b class=up>above</b> its 20-day EMA → book B takes buys only" if up
+                                        else "NIFTY is <b class=dn>below</b> its 20-day EMA → book B takes sells only"))
+    return f"""<div class="sh"><h2>Paper trades</h2><span class="meta">forward test since {e(fmt_day(since)) if since else "the next scan"} · nothing is really bought or sold</span></div>
+<div class="panel rules"><b>The rule being tested:</b> double confirmations (SuperTrend + ADX DI) on liquid Nifty 100 stocks, traded intraday — in two books.
+<div class="chips">{"".join(f'<span class="chip">{e(r)}</span>' for r in rules)}</div>
+<div class="sm" style="margin-top:6px">Today: {mk}. Change the rules in <a class="tv" href="{CONFIG_EDIT_URL}" target="_blank" rel="noopener">trading_config.json</a>.
+On 57 past sessions the market filter lifted these trades from about 0% to +0.14–0.26% each — this tab checks whether that holds going forward.</div></div>
+<section style="margin-top:14px"><div class="sh"><h2>Book A vs book B</h2><span class="meta">same capital and limits · after costs</span></div>
+<div class="panel tw"><table><thead><tr><th>Book</th><th class="r">Closed</th><th class="r">Win rate</th><th class="r">Avg / trade</th>
+<th class="r hide-sm">Realised</th><th class="r hide-md">Open</th><th class="r">Equity</th></tr></thead><tbody>{comp}</tbody></table></div></section>
+<div class="tb"><div class="seg" id="f-book"><button class="on" data-f="A">Book A · all</button><button data-f="B">Book B · with market</button></div></div>
+{books}"""
+
+
+def _paper_view_html(state, cfg, key=PAPER_KEY):
+    """One paper book: KPIs, running P&L, exits, positions, trades, risk-gate blocks."""
+    e = html_lib.escape
+    p = state.get(key) or {}
     trades = p.get("trades", [])
     cap = cfg["capital"]
     closed = [t for t in trades if t["status"] == "closed"]
@@ -1898,20 +1977,11 @@ def _paper_view_html(state, cfg):
     for t in sorted(closed, key=lambda x: x["exit_bar"]):
         run += t["pnl"]
         curve.append(run)
-    rules = [f"{_inr(cfg['per_trade'])} a trade (whole shares)", f"+{cfg['target_pct']:g}% target", f"−{cfg['stop_pct']:g}% stop",
-             f"entries {cfg['window'][0]}–{cfg['window'][1]}", "closes by 3:15 PM", f"max {cfg['max_open']} open",
-             f"max {cfg['max_trades_per_day']} a day", f"stop for the day at −{cfg['daily_loss_limit_pct']:g}%",
-             f"{cfg['cash_buffer_pct']:g}% cash kept", f"{cfg['cost_pct']:g}% costs a trade"]
 
     def tbl(head, rows, empty):
         return (f'<div class="panel tw"><table><thead><tr>{head}</tr></thead><tbody>'
                 f'{rows or f"<tr><td colspan=10 class=empty>{empty}</td></tr>"}</tbody></table></div>')
-    return f"""<div class="sh"><h2>Paper trades</h2><span class="meta">forward test since {e(fmt_day(since)) if since else "the next scan"} · nothing is really bought or sold</span></div>
-<div class="panel rules"><b>The rule being tested:</b> every double confirmation (SuperTrend + ADX DI) on a Nifty 100 stock, traded intraday.
-<div class="chips">{"".join(f'<span class="chip">{e(r)}</span>' for r in rules)}</div>
-<div class="sm" style="margin-top:6px">Change these in <a class="tv" href="{CONFIG_EDIT_URL}" target="_blank" rel="noopener">trading_config.json</a>.
-This was the only setup above zero on unseen data (+0.06–0.08% a trade): this tab checks whether that holds going forward.</div></div>
-<div class="kpis k5" style="margin-top:14px">{kpis}</div>
+    return f"""<div class="kpis k5" style="margin-top:14px">{kpis}</div>
 <div class="grid2"><section><div class="sh"><h2>Running P&amp;L</h2><span class="meta">closed trades, after costs</span></div>
 <div class="panel" style="padding:12px 14px">{_spark(curve)}</div></section>
 <section><div class="sh"><h2>How trades ended</h2><span class="meta">count · P&amp;L</span></div>
@@ -2065,9 +2135,20 @@ def write_dashboard(state):
             return '<td class="r"><span class="fa">—</span></td><td class="r hide-sm"><span class="fa">—</span></td>'
         return f'<td class="r">{_pct(h.get("mfe"))}</td><td class="r hide-sm">{_pct(h.get("mae"))}</td>'
 
+    mup = market_up(state)
+
+    def mkt_tag(direction):
+        if mup is None:
+            return '<span class="fa">—</span>'
+        return ('<span class="tag ok" title="Trades with the market — NIFTY vs its 20-day EMA">✓ with</span>'
+                if mup == (direction == "buy") else '<span class="tag mute" title="Against the market">against</span>')
+    mkt_line = ("" if mup is None else
+                f'<div class="mkt {"up" if mup else "dn"}"><b>Market:</b> NIFTY closed {"above" if mup else "below"} its 20-day EMA — '
+                f'confirmations that {"buy" if mup else "sell"} trade with it. On 57 past sessions those did clearly better '
+                f'(+0.14–0.26% a trade vs about 0%).</div>')
     conf_rows = "".join(
         f'<tr data-sym="{e(c["name"])}" data-t="{hhmm(c["st"] if c["st"]["time"] > c["adx"]["time"] else c["adx"])}"><td>{_tv(c["name"])}</td>'
-        f'<td>{_tag("CONFIRMED " + c["dir"].upper())}</td>'
+        f'<td>{_tag("CONFIRMED " + c["dir"].upper())}</td><td>{mkt_tag(c["dir"])}</td>'
         f'<td>{_tag(c["st"]["label"])} <span class="mu">{e(fmt_time(c["st"]["time"]))}</span></td>'
         f'<td>{_tag(c["adx"]["label"])} <span class="mu">{e(fmt_time(c["adx"]["time"]))}</span></td>'
         f'<td class="r">{_fmt_price(c["price"])}</td><td class="r">{_fmt_price(_current_price(state, c["name"]))}</td>'
@@ -2315,7 +2396,8 @@ stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
 <div class="kpis k5">{kpis}</div>
 <section><div class="sh"><h2>Double confirmations</h2><span class="meta" id="c-conf">{e(fmt_day(latest_day)) if latest_day else ""}</span></div>
 <p class="note">SuperTrend and ADX DI gave the same signal on the same day — the latest signal of each counts.</p>
-{table("t-conf", '<th>Stock</th><th>Setup</th><th>SuperTrend</th><th>ADX DI</th><th class="r">At signal</th><th class="r">Now</th><th class="r">Move</th><th class="r">Max gain</th><th class="r hide-sm">Max drawdown</th>',
+{mkt_line}
+{table("t-conf", '<th>Stock</th><th>Setup</th><th title="Buys when NIFTY is above its 20-day EMA, sells when below">Market</th><th>SuperTrend</th><th>ADX DI</th><th class="r">At signal</th><th class="r">Now</th><th class="r">Move</th><th class="r">Max gain</th><th class="r hide-sm">Max drawdown</th>',
        conf_rows, "No double confirmations today yet.")}</section>
 <section><div class="sh"><h2>Daily EMA crosses</h2><span class="meta" id="c-dx">last {DAILY_CROSS_DAYS} sessions</span></div>
 <p class="note">EMA50 crossing EMA100 (early cross) or EMA200 (golden / death cross) on daily candles — the TradingView "EMA 50, 100 and 200" indicator.</p>
@@ -2406,7 +2488,7 @@ Ignores brokerage, taxes and slippage. <b>Focus</b> (top right) applies here too
 </div>
 
 <div class="view" id="v-paper">
-{_paper_view_html(state, tcfg["paper"])}
+{_paper_tab_html(state, tcfg["paper"])}
 </div>
 
 <div class="view" id="v-momentum">
@@ -2796,9 +2878,10 @@ def scan_once(per_symbol_delay=None, backfill=False):
     alert_msgs = []
     if not backfill:
         try:
-            update_paper(state, [{**c, "bar": max(str(c["st"].get("bar") or c["st"]["time"]),
-                                                  str(c["adx"].get("bar") or c["adx"]["time"]))} for c in new_conf],
-                         now_str, cfg["paper"])
+            cands = [{**c, "bar": max(str(c["st"].get("bar") or c["st"]["time"]),
+                                      str(c["adx"].get("bar") or c["adx"]["time"]))} for c in new_conf]
+            update_paper(state, cands, now_str, cfg["paper"])
+            update_paper(state, cands, now_str, cfg["paper"], key=PAPER_MKT_KEY, market_filter=True)
         except Exception as e:  # noqa: BLE001 — the paper book must never break a scan
             print(f"[warn] paper portfolio update failed: {e}")
         try:
