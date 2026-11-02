@@ -17,6 +17,18 @@
     "cost_pct": 0.122
   },
 
+  "positional": {
+    "_help": "Paper book C: Chartink's 'Short term breakouts' scan on daily candles. Each final signal is bought at the next session's open and sold at the close after hold_days sessions. telegram_digest sends the day's breakouts to Telegram once, after 3:30 PM.",
+    "capital": 200000,
+    "per_trade": 20000,
+    "max_open": 10,
+    "max_trades_per_day": 3,
+    "hold_days": 20,
+    "cash_buffer_pct": 5,
+    "cost_pct": 0.28,
+    "telegram_digest": true
+  },
+
   "momentum": {
     "_help": "Your budget for the monthly momentum portfolio. The Momentum tab turns it into whole-share orders: what to buy if you start now, and what to sell and buy at the next rebalance.",
     "budget": 200000,

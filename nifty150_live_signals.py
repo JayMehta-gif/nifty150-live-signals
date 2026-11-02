@@ -549,12 +549,37 @@ def daily_ema_trend(symbol, yf_ticker, df15):
                 dx.append({"k": "EMA_EARLY" if kind == 0 else "EMA_GOLDEN", "d": d, "date": str(days[k]),
                            "px": round(float(px[k]), 2), "f": int(k == len(px) - 1 and last_open)})
     done = hist[hist.index.date < last_day]
+    stb = short_term_breakouts(done, df15, last_day, last_open)
     tv20 = float((done["close"] * done["volume"]).iloc[-20:].mean() / 1e7) if "volume" in done else None
     above20 = bool(closes.iloc[-1] > closes.ewm(span=20, adjust=False).mean().iloc[-1])
     return {"gc": gc, "gc_date": gc_date, "gc_days": gc_days, "ec": ec, "ec_date": ec_date,
             "ec_days": ec_days, "ema200_dist": round(float((c.iloc[-1] / e200[-1] - 1) * 100), 2),
-            "dx": dx, "dxs": dxs, "tv20": round(tv20, 1) if tv20 is not None else None,
+            "dx": dx, "dxs": dxs, "stb": stb, "tv20": round(tv20, 1) if tv20 is not None else None,
             "above20": above20}   # tv20 = ₹ crore traded a day (20 sessions); above20 = last close above its 20-day EMA
+
+
+def short_term_breakouts(done, df15, last_day, last_open):
+    """Chartink's "Short term breakouts" scan on daily candles: the best close of
+    the last 5 sessions is 5% above the highest close of the 120 sessions before
+    that (ending 6 sessions ago), volume above its 5-day average, and a higher
+    close. Today's candle is built from the 15-min bars ("f" = still forming
+    until 3:30 PM). Returns the signals of the last DAILY_CROSS_DAYS sessions."""
+    if "volume" not in done or len(done) < 130:
+        return []
+    t15 = df15[df15.index.date == last_day]
+    dates = list(done.index.date) + ([last_day] if len(t15) else [])
+    c = pd.Series(list(done["close"].to_numpy()) + ([float(t15["close"].iloc[-1])] if len(t15) else []))
+    v = pd.Series(list(done["volume"].to_numpy()) + ([float(t15["volume"].sum())] if len(t15) else []))
+    hi120 = c.rolling(120).max().shift(6)
+    vavg = v.rolling(5).mean()
+    sig = (c.rolling(5).max() > hi120 * 1.05) & (v > vavg) & (c > c.shift())
+    out = []
+    for k in np.nonzero(sig.to_numpy())[0]:
+        if k >= len(c) - DAILY_CROSS_DAYS:
+            out.append({"date": str(dates[k]), "px": round(float(c[k]), 2), "hi120": round(float(hi120[k]), 2),
+                        "volx": round(float(v[k] / vavg[k]), 2) if vavg[k] else None,
+                        "f": int(k == len(c) - 1 and last_open)})
+    return out
 
 
 def daily_cross_alerts(name, prev, cur):
@@ -716,6 +741,8 @@ CONFIG_DEFAULTS = {
               "daily_loss_limit_pct": 2, "cash_buffer_pct": 10, "target_pct": 3, "stop_pct": 2,
               "window": ["09:45", "14:30"], "square_off": "15:00", "cost_pct": 0.122},
     "momentum": {"budget": 200000, "cash_buffer_pct": 5, "max_position_pct": 10, "band_pct": 2, "min_order": 1000},
+    "positional": {"capital": 200000, "per_trade": 20000, "max_open": 10, "max_trades_per_day": 3, "hold_days": 20,
+                   "cash_buffer_pct": 5, "cost_pct": 0.28, "telegram_digest": True},
     "alerts": [],
 }
 
@@ -729,7 +756,7 @@ def load_trading_config():
     except Exception as e:  # noqa: BLE001
         print(f"[warn] trading_config.json unreadable ({e}); using defaults")
         user = {}
-    for k in ("paper", "momentum"):
+    for k in ("paper", "momentum", "positional"):
         cfg[k].update({kk: vv for kk, vv in (user.get(k) or {}).items() if not kk.startswith("_")})
     cfg["alerts"] = [a for a in (user.get("alerts") or []) if isinstance(a, dict) and a.get("symbol")]
     return cfg
@@ -855,6 +882,114 @@ def update_paper(state, confirmed, now_str, cfg, key=PAPER_KEY, market_filter=Fa
         open_now.append(t)
         cash -= qty * price
     p["trades"] = trades[-2000:]
+
+
+# ── positional paper book: Chartink "Short term breakouts", held 20 sessions ──
+PAPER_POS_KEY = "__PAPER_POS__"
+
+
+def _sessions(df):
+    """Trading days in a 15-min frame: {date: (first open, last close, last candle HH:MM)}."""
+    out = {}
+    for d, g in df.groupby(df.index.date):
+        out[d] = (float(g["open"].iloc[0]), float(g["close"].iloc[-1]), g.index[-1].strftime("%H:%M"))
+    return out
+
+
+def update_positional(state, now_str, cfg):
+    """Forward paper test of the breakout scan: every final signal is bought at the
+    next session's open (whole shares, liquid names first when slots are short),
+    held for hold_days sessions counting the entry day, and sold at that day's
+    close. Delivery costs on every round trip. Limits: max open positions, max new
+    positions per signal day, cash buffer; blocked entries are logged."""
+    p = state.setdefault(PAPER_POS_KEY, {"since": now_str[:10], "trades": [], "skipped": []})
+    trades = p["trades"]
+    seen = {(t["sym"], t["signal"]) for t in trades} | {(b["sym"], b.get("signal")) for b in p["skipped"]}
+    # 1) exits after hold_days sessions
+    for t in trades:
+        if t["status"] != "open":
+            continue
+        df = _bars_for(t["sym"])
+        if df is None or df.empty:
+            continue
+        ses = _sessions(df)
+        days = [d for d in sorted(ses) if str(d) >= t["day"]]
+        if len(days) >= cfg["hold_days"]:
+            d = days[cfg["hold_days"] - 1]
+            o_, close, last = ses[d]
+            if last >= "15:15" or str(d) < now_str[:10]:
+                gross = (close - t["entry"]) * t["qty"]
+                cost = t["entry"] * t["qty"] * cfg["cost_pct"] / 100
+                t.update(status="closed", exit=round(close, 2), exit_bar=f"{d} 15:15:00", reason="time",
+                         pnl=round(gross - cost, 2), pnl_pct=round((gross - cost) / (t["entry"] * t["qty"]) * 100, 3))
+    # 2) entries: final signals from earlier sessions, at the next session's open
+    cands = []
+    for sym, info in state.items():
+        if not isinstance(info, dict) or not info.get("stb") or sym.startswith("__"):
+            continue
+        for x in info["stb"]:
+            if x["f"] or x["date"] >= now_str[:10] or (sym, x["date"]) in seen:
+                continue
+            df = _bars_for(sym)
+            if df is None or df.empty:
+                continue
+            ses = _sessions(df)
+            nxt = [d for d in sorted(ses) if str(d) > x["date"]]
+            if not nxt or (pd.Timestamp(nxt[0]) - pd.Timestamp(x["date"])).days > 5:
+                continue  # entry session not in the data (or the book was offline too long)
+            if str(nxt[0]) < p["since"]:
+                continue  # forward test only: never buy at an open from before the book started
+            cands.append((x["date"], -(info.get("tv20") or 0), sym, str(nxt[0]), ses[nxt[0]][0]))
+    realised = sum(t["pnl"] for t in trades if t["status"] == "closed")
+    open_now = [t for t in trades if t["status"] == "open"]
+    cash = cfg["capital"] + realised - sum(t["entry"] * t["qty"] for t in open_now)
+    for sig_day, _, sym, day, entry in sorted(cands):
+        if any(t["sym"] == sym and (t["status"] == "open" or t["exit_bar"][:10] >= day) for t in trades):
+            continue  # a repeat breakout of a stock held (or still held on that entry day)
+        qty = int(cfg["per_trade"] // entry) if entry > 0 else 0
+        reason = None
+        if len(open_now) >= cfg["max_open"]:
+            reason = f"{cfg['max_open']} positions already open"
+        elif sum(1 for t in trades if t["signal"] == sig_day) >= cfg["max_trades_per_day"]:
+            reason = f"already {cfg['max_trades_per_day']} new positions from {sig_day}"
+        elif qty < 1:
+            reason = "price above the per-trade amount"
+        elif cash - qty * entry < cfg["capital"] * cfg["cash_buffer_pct"] / 100:
+            reason = "would dip into the cash buffer"
+        if reason:
+            p["skipped"] = (p["skipped"] + [{"time": now_str, "sym": sym, "dir": "buy", "price": entry,
+                                             "signal": sig_day, "reason": reason}])[-300:]
+            continue
+        t = {"sym": sym, "dir": "buy", "signal": sig_day, "day": day, "bar": f"{day} 09:15:00", "opened": now_str,
+             "entry": round(entry, 2), "qty": qty, "status": "open"}
+        trades.append(t)
+        open_now.append(t)
+        cash -= qty * entry
+    p["trades"] = trades[-3000:]
+
+
+def breakout_digest(state, now_str):
+    """Telegram text listing today's final breakouts (once a day, after 3:30 PM)."""
+    day = now_str[:10]
+    if now_str[11:16] < "15:30" or (state.get(PAPER_POS_KEY) or {}).get("digest_sent") == day:
+        return None
+    hits = []
+    for sym, info in state.items():
+        if isinstance(info, dict) and not sym.startswith("__"):
+            for x in info.get("stb") or []:
+                if x["date"] == day and not x["f"]:
+                    hits.append((-(info.get("tv20") or 0), sym, x))
+    state.setdefault(PAPER_POS_KEY, {"since": day, "trades": [], "skipped": []})["digest_sent"] = day
+    if not hits:
+        return None
+    hits.sort()
+    lines = [f"📈 <b>Short-term breakouts today</b> ({len(hits)})"]
+    lines += [f"{html_lib.escape(sym)}  ₹{x['px']:,.2f}  · {(x['px'] / x['hi120'] - 1) * 100:+.1f}% over the 120-day high"
+              for _, sym, x in hits[:12]]
+    if len(hits) > 12:
+        lines.append(f"…and {len(hits) - 12} more on the dashboard")
+    lines.append("<i>Positional scan: in backtests, held ~20 sessions. Research, not advice.</i>")
+    return chr(10).join(lines)
 
 
 # ── momentum orders sized to the user's budget (the trader-budget / -rebalance idea) ──
@@ -1376,7 +1511,7 @@ const VIEWS={all:()=>true,today:d=>d.today==='1'||FAV.has(d.sym),golden:d=>d.gc=
 /* Focus: Nifty 100 stocks + indices, signal candles 9:45 AM – 2:30 PM (switch in the header) */
 let FOCUS=true;try{FOCUS=localStorage.getItem('focus')!=='0'}catch(e){}
 const inFocus=(n,t)=>!FOCUS||(N100.has(n)&&t>=FOCUS_WIN[0]&&t<FOCUS_WIN[1]);
-const live=filterer('#t-live tbody','#c-live'),conf=filterer('#t-conf tbody','#c-conf'),dxf=filterer('#t-dx tbody','#c-dx');
+const live=filterer('#t-live tbody','#c-live'),conf=filterer('#t-conf tbody','#c-conf'),dxf=filterer('#t-dx tbody','#c-dx'),stbf=filterer('#t-stb tbody','#c-stb');
 seg($('#f-live-dir'),v=>live.set('dir',v));
 /* shared archive (ARCH/NAMES/PX/PDAYS come from the data script).
    ARCH row: [time, name#, label, strategy 0 ST/1 ADX/2 CONFIRMED, price, exit, bars, open, max gain, max drawdown] */
@@ -1552,7 +1687,7 @@ paintStars();
 /* Focus switch: re-filter every view */
 const fb=$('#focus');
 function applyFocus(){fb.classList.toggle('on',FOCUS);fb.textContent=FOCUS?'Focus':'All signals';
- for(const f of[live,conf,dxf])f.set('focus',FOCUS?'1':'');
+ for(const f of[live,conf,dxf,stbf])f.set('focus',FOCUS?'1':'');
  $('#dx-n100').style.display=FOCUS?'':'none';$('#dx-all').style.display=FOCUS?'none':'';
  renderPast();renderAcc(accSel.value)}
 fb.onclick=()=>{FOCUS=!FOCUS;try{localStorage.setItem('focus',FOCUS?'1':'0')}catch(e){}applyFocus()};
@@ -1881,11 +2016,12 @@ def _paper_stats(state, key, cfg):
             "avg": (sum(t["pnl_pct"] for t in closed) / len(closed)) if closed else None, "since": p.get("since")}
 
 
-PAPER_BOOKS = ((PAPER_KEY, "A", "All confirmations", "every double confirmation that passes the universe, window and liquidity rules"),
-               (PAPER_MKT_KEY, "B", "With the market", "the same, but buys only when NIFTY is above its 20-day EMA and sells only when below"))
+PAPER_BOOKS = ((PAPER_KEY, "A", "All confirmations", "intraday: every double confirmation that passes the universe, window and liquidity rules"),
+               (PAPER_MKT_KEY, "B", "With the market", "intraday: the same, but buys only when NIFTY is above its 20-day EMA and sells only when below"),
+               (PAPER_POS_KEY, "C", "Positional breakouts", "Chartink short-term breakouts: buy at the next open, sell after 20 sessions"))
 
 
-def _paper_tab_html(state, cfg):
+def _paper_tab_html(state, cfg, pcfg=None):
     """Paper trades tab: two books side by side (with / without the market filter)."""
     e = html_lib.escape
     up = market_up(state)
@@ -1895,26 +2031,29 @@ def _paper_tab_html(state, cfg):
              f"max {cfg['max_open']} open", f"max {cfg['max_trades_per_day']} a day",
              f"stop for the day at −{cfg['daily_loss_limit_pct']:g}%", f"{cfg['cash_buffer_pct']:g}% cash kept", f"{cfg['cost_pct']:g}% costs a trade"]
     comp = ""
+    pcfg = pcfg or CONFIG_DEFAULTS["positional"]
+    book_cfg = lambda k: pcfg if k == PAPER_POS_KEY else cfg  # noqa: E731
     for key, bid, title, desc in PAPER_BOOKS:
-        st = _paper_stats(state, key, cfg)
+        st = _paper_stats(state, key, book_cfg(key))
         win = "—" if st["win"] is None else f'{st["win"]:.0f}%'
         comp += (f'<tr><td><span class="tag ok">{bid}</span> <b>{e(title)}</b><div class="sm hide-sm">{e(desc)}</div></td>'
                  f'<td class="r">{st["n"]}</td><td class="r">{win}</td>'
                  f'<td class="r">{_pct(st["avg"])}</td><td class="r hide-sm">{_inr(st["realised"], sign=True)}</td><td class="r hide-md">{st["open"]}</td>'
                  f'<td class="r"><b>{_inr(st["equity"])}</b></td></tr>')
-    books = "".join(f'<div class="book" data-book="{bid}"{"" if bid == "A" else " hidden"}>{_paper_view_html(state, cfg, key)}</div>'
+    books = "".join(f'<div class="book" data-book="{bid}"{"" if bid == "A" else " hidden"}>{_paper_view_html(state, book_cfg(key), key)}</div>'
                     for key, bid, *_ in PAPER_BOOKS)
     mk = ("unknown" if up is None else ("NIFTY is <b class=up>above</b> its 20-day EMA → book B takes buys only" if up
                                         else "NIFTY is <b class=dn>below</b> its 20-day EMA → book B takes sells only"))
     return f"""<div class="sh"><h2>Paper trades</h2><span class="meta">forward test since {e(fmt_day(since)) if since else "the next scan"} · nothing is really bought or sold</span></div>
-<div class="panel rules"><b>The rule being tested:</b> double confirmations (SuperTrend + ADX DI) on liquid Nifty 100 stocks, traded intraday — in two books.
+<div class="panel rules"><b>Books A and B</b> trade double confirmations (SuperTrend + ADX DI) on liquid Nifty 100 stocks intraday;
+<b>book C</b> holds Chartink's short-term breakouts for {pcfg["hold_days"] if pcfg else 20} sessions (₹{(pcfg or CONFIG_DEFAULTS["positional"])["per_trade"]:,} a position, max {(pcfg or CONFIG_DEFAULTS["positional"])["max_open"]} open, {(pcfg or CONFIG_DEFAULTS["positional"])["cost_pct"]:g}% delivery costs). Intraday rules:
 <div class="chips">{"".join(f'<span class="chip">{e(r)}</span>' for r in rules)}</div>
 <div class="sm" style="margin-top:6px">Today: {mk}. Change the rules in <a class="tv" href="{CONFIG_EDIT_URL}" target="_blank" rel="noopener">trading_config.json</a>.
 On 57 past sessions the market filter lifted these trades from about 0% to +0.14–0.26% each — this tab checks whether that holds going forward.</div></div>
-<section style="margin-top:14px"><div class="sh"><h2>Book A vs book B</h2><span class="meta">same capital and limits · after costs</span></div>
+<section style="margin-top:14px"><div class="sh"><h2>Books compared</h2><span class="meta">₹2 lakh each · after costs</span></div>
 <div class="panel tw"><table><thead><tr><th>Book</th><th class="r">Closed</th><th class="r">Win rate</th><th class="r">Avg / trade</th>
 <th class="r hide-sm">Realised</th><th class="r hide-md">Open</th><th class="r">Equity</th></tr></thead><tbody>{comp}</tbody></table></div></section>
-<div class="tb"><div class="seg" id="f-book"><button class="on" data-f="A">Book A · all</button><button data-f="B">Book B · with market</button></div></div>
+<div class="tb"><div class="seg" id="f-book"><button class="on" data-f="A">A · all</button><button data-f="B">B · with market</button><button data-f="C">C · positional</button></div></div>
 {books}"""
 
 
@@ -1953,10 +2092,11 @@ def _paper_view_html(state, cfg, key=PAPER_KEY):
     open_rows = "".join(
         f'<tr><td>{_tv(t["sym"])}</td><td>{_tag("BUY" if t["dir"] == "buy" else "SELL")}</td>'
         f'<td class="mu">{e(fmt_time(t["bar"]))}</td><td class="r">{t["qty"]}</td><td class="r">{_fmt_price(t["entry"])}</td>'
-        f'<td class="r up">{_fmt_price(t["target"])}</td><td class="r dn">{_fmt_price(t["stop"])}</td>'
+        f'<td class="r up">{_fmt_price(t.get("target"))}</td><td class="r dn">{_fmt_price(t.get("stop"))}</td>'
         f'<td class="r">{_fmt_price(_current_price(state, t["sym"]))}</td><td class="r">{_inr(unreal(t), sign=True)}</td></tr>'
         for t in sorted(opened, key=lambda x: x["bar"], reverse=True))
-    reason_tag = {"target": ("TARGET", "up"), "stop": ("STOP", "dn"), "flip": ("FLIP", "mute"), "square-off": ("3:15 CLOSE", "mute")}
+    reason_tag = {"target": ("TARGET", "up"), "stop": ("STOP", "dn"), "flip": ("FLIP", "mute"), "square-off": ("3:15 CLOSE", "mute"),
+                  "time": (f"{cfg.get('hold_days', 20)} DAYS", "mute")}
     closed_rows = "".join(
         f'<tr><td class="mu">{e(fmt_day(t["day"]))}</td><td>{_tv(t["sym"])}</td><td>{_tag("BUY" if t["dir"] == "buy" else "SELL")}</td>'
         f'<td class="r">{t["qty"]}</td><td class="r">{_fmt_price(t["entry"])} <span class="sm">{e(fmt_time(t["bar"]))}</span></td>'
@@ -2199,6 +2339,26 @@ def write_dashboard(state):
     cross_list.sort(key=lambda t: (t[0], t[1]), reverse=True)
     cross_rows = "".join(r for _, _, r in cross_list)
 
+    # ── positional: Chartink "Short term breakouts" (daily), newest first
+    stb_list = []
+    for key, info in state.items():
+        if not isinstance(info, dict) or not info.get("stb") or key.startswith("__"):
+            continue
+        now_px = _current_price(state, key)
+        for x in info["stb"]:
+            mv = (now_px / x["px"] - 1) * 100 if now_px and x["px"] else None
+            forming = (' <span class="tag mute" title="Today’s candle is still open — final at 3:30 PM">forming</span>'
+                       if x["f"] else "")
+            over = (x["px"] / x["hi120"] - 1) * 100 if x.get("hi120") else None
+            volx = f'{x["volx"]:.1f}×' if x.get("volx") else "—"
+            stb_list.append((x["date"], info.get("tv20") or 0, (
+                f'<tr data-sym="{e(key)}" data-t="12:00"><td class="mu">{e(fmt_day(x["date"]))}</td><td>{_tv(key)}{forming}</td>'
+                f'<td class="r">{_fmt_price(x["px"])}</td><td class="r">{_pct(over)}</td>'
+                f'<td class="r">{volx}</td><td class="r">{_fmt_price(now_px)}</td><td class="r">{_pct(mv)}</td>'
+                f'<td class="r hide-sm">{(info.get("tv20") or 0):,.0f}</td></tr>')))
+    stb_list.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    stb_rows = "".join(r for _, _, r in stb_list)
+
     # 5-year record of the daily crosses, for the Accuracy tab (all stocks / Nifty 100)
     def cross_record(names):
         groups = {}
@@ -2403,6 +2563,12 @@ stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
 <p class="note">EMA50 crossing EMA100 (early cross) or EMA200 (golden / death cross) on daily candles — the TradingView "EMA 50, 100 and 200" indicator.</p>
 {table("t-dx", '<th>Stock</th><th title="EMA50 crossing EMA100 — latest cross in the window">EMA 50×100 (early)</th><th title="EMA50 crossing EMA200 — latest cross in the window">EMA 50×200 (golden / death)</th><th class="r">Now</th><th class="hide-sm">Daily trend</th>',
        cross_rows, "No daily EMA crosses in this window.")}</section>
+<section><div class="sh"><h2>Positional: short-term breakouts</h2><span class="meta" id="c-stb">last {DAILY_CROSS_DAYS} sessions</span></div>
+<p class="note">Chartink's most-liked scan, on daily candles: best close of 5 days at least 5% above the prior 120-day high, volume above its
+5-day average, higher close. In a 5-year backtest these beat the average stock by about 1.5% over the next 20 sessions (every year positive) —
+before tax, and flattered by survivorship bias. Book C on the Paper tab tracks it forward.</p>
+{table("t-stb", '<th>Signal day</th><th>Stock</th><th class="r">Close</th><th class="r">Above 120-day high</th><th class="r">Volume</th><th class="r">Now</th><th class="r">Since</th><th class="r hide-sm">₹ cr / day</th>',
+       stb_rows, "No breakouts in the last 10 sessions.")}</section>
 {_alerts_html(state, tcfg)}
 <details class="more"><summary>All signals today <span class="mu" id="c-live"></span></summary>
 <div class="tb" style="margin:12px 0"><div class="seg" id="f-live-dir"><button class="on" data-f="all">All</button>
@@ -2488,7 +2654,7 @@ Ignores brokerage, taxes and slippage. <b>Focus</b> (top right) applies here too
 </div>
 
 <div class="view" id="v-paper">
-{_paper_tab_html(state, tcfg["paper"])}
+{_paper_tab_html(state, tcfg["paper"], tcfg["positional"])}
 </div>
 
 <div class="view" id="v-momentum">
@@ -2882,10 +3048,15 @@ def scan_once(per_symbol_delay=None, backfill=False):
                                       str(c["adx"].get("bar") or c["adx"]["time"]))} for c in new_conf]
             update_paper(state, cands, now_str, cfg["paper"])
             update_paper(state, cands, now_str, cfg["paper"], key=PAPER_MKT_KEY, market_filter=True)
+            update_positional(state, now_str, cfg["positional"])
         except Exception as e:  # noqa: BLE001 — the paper book must never break a scan
             print(f"[warn] paper portfolio update failed: {e}")
         try:
             alert_msgs = check_alerts(state, cfg, now_str)
+            if cfg["positional"].get("telegram_digest"):
+                dg = breakout_digest(state, now_str)
+                if dg:
+                    alert_msgs.append(dg)
         except Exception as e:  # noqa: BLE001
             print(f"[warn] price alerts failed: {e}")
 
