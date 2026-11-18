@@ -918,7 +918,7 @@ def _bars_for(name):
     return load_bars_cache().get(INDEX_TICKERS.get(name, f"{name}.NS"))
 
 
-def _paper_exit(t, archive, cfg):
+def _paper_exit(t, archive, cfg, upto=None):
     """Walk the 15-min bars after an open paper trade's entry candle and return
     (exit_bar, price, reason) for the first exit, or None while it is still open.
     Order inside a candle: stop before target when both are touched (the cautious
@@ -931,7 +931,8 @@ def _paper_exit(t, archive, cfg):
     flip = next((h for h in archive if h["strategy"] == "CONFIRMED" and h["name"] == t["sym"]
                  and h["time"][:10] == t["day"] and ("SELL" in h["label"]) != buy and not h.get("open")
                  and h.get("exit_time") and h["exit_time"] > t["bar"]), None)
-    after = df[(df.index.strftime("%Y-%m-%d %H:%M:%S") > t["bar"]) & (df.index.strftime("%Y-%m-%d") == t["day"])]
+    stamps = df.index.strftime("%Y-%m-%d %H:%M:%S")
+    after = df[(stamps > t["bar"]) & (df.index.strftime("%Y-%m-%d") == t["day"]) & ((stamps <= upto) if upto else True)]
     for ts, row in after.iterrows():
         stamp = ts.strftime("%Y-%m-%d %H:%M:%S")
         hi, lo = float(row["high"]), float(row["low"])
@@ -946,7 +947,7 @@ def _paper_exit(t, archive, cfg):
         if ts.strftime("%H:%M") >= cfg["square_off"]:
             return stamp, float(row["close"]), "square-off"
     # entry day is over but its last candle never reached the square-off time (data gap)
-    if len(after) and after.index[-1].date() < datetime.now(IST).date():
+    if upto is None and len(after) and after.index[-1].date() < datetime.now(IST).date():
         return after.index[-1].strftime("%Y-%m-%d %H:%M:%S"), float(after["close"].iloc[-1]), "square-off"
     return None
 
@@ -959,51 +960,76 @@ def market_up(state):
     return (state.get(INDEX_STATE_PREFIX + "NIFTY 50") or {}).get("above20")
 
 
-def with_market(state, direction):
-    up = market_up(state)
+def market_up_on(day):
+    """NIFTY 50's last close BEFORE `day` above its 20-day EMA (None if unknown)."""
+    d = load_bars_cache().get(f'{INDEX_TICKERS["NIFTY 50"]}|1d')
+    if d is None or d.empty:
+        return None
+    c = d["close"][d.index.date < pd.Timestamp(day).date()]
+    if len(c) < 25:
+        return None
+    return bool(c.iloc[-1] > c.ewm(span=20, adjust=False).mean().iloc[-1])
+
+
+def with_market(state, direction, day=None):
+    up = market_up_on(day) if day else market_up(state)
+    if up is None and day:
+        up = market_up(state)
     return up is not None and up == (direction == "buy")
 
 
+def _close_trade(t, out, cfg):
+    bar, px, why = out
+    sign = 1 if t["dir"] == "buy" else -1
+    gross = (px - t["entry"]) * t["qty"] * sign
+    cost = t["entry"] * t["qty"] * cfg["cost_pct"] / 100
+    t.update(status="closed", exit=round(px, 2), exit_bar=bar, reason=why,
+             pnl=round(gross - cost, 2), pnl_pct=round((gross - cost) / (t["entry"] * t["qty"]) * 100, 3))
+
+
 def update_paper(state, confirmed, now_str, cfg, key=PAPER_KEY, market_filter=False):
-    """Forward paper test of the one setup that was above zero out of sample:
-    double confirmations, intraday, +target / −stop. New entries pass a risk gate
-    (the trader-risk idea): duplicates, max open positions, max trades a day, the
-    daily loss limit and the cash buffer; anything blocked is logged with the
-    reason. Whole shares; costs charged on every round trip."""
+    """Paper test of the one setup that was above zero out of sample: double
+    confirmations, intraday, +target / −stop. Candidates come from the bar-by-bar
+    replay (the archive's CONFIRMED entries, each at its own candle time and
+    close), so the book does not depend on when scans happen to run — a late or
+    end-of-day scan catches up every session since the book started. They are
+    taken in time order: exits up to each candidate's candle are applied first,
+    then the risk gate (the trader-risk idea) — duplicates, max open positions,
+    max trades a day, the daily loss limit, the cash buffer — sees the book as it
+    stood at that moment. Blocked entries are logged once with the reason.
+    `confirmed` (this scan's live confirmations) is not needed and ignored."""
     p = state.setdefault(key, {"since": now_str[:10], "trades": [], "skipped": []})
     archive = state.get(ARCHIVE_KEY, [])
     n100 = set(state.get(SCAN_META_KEY, {}).get("n100") or [])
     trades = p["trades"]
-    # 1) exits for open trades
-    for t in trades:
-        if t["status"] != "open":
+    seen = {f'{t["sym"]}|{t["bar"]}' for t in trades} | {b.get("key") for b in p["skipped"]}
+    cands = []
+    for h in archive:
+        if h["strategy"] != "CONFIRMED" or h["time"][:10] < p["since"] or h["time"][:10] > now_str[:10]:
             continue
-        out = _paper_exit(t, archive, cfg)
-        if out:
-            bar, px, why = out
-            sign = 1 if t["dir"] == "buy" else -1
-            gross = (px - t["entry"]) * t["qty"] * sign
-            cost = t["entry"] * t["qty"] * cfg["cost_pct"] / 100
-            t.update(status="closed", exit=round(px, 2), exit_bar=bar, reason=why,
-                     pnl=round(gross - cost, 2), pnl_pct=round((gross - cost) / (t["entry"] * t["qty"]) * 100, 3))
-    # 2) new entries through the risk gate
-    day = now_str[:10]
-    closed_today = [t for t in trades if t["status"] == "closed" and t["exit_bar"][:10] == day]
-    realised = sum(t["pnl"] for t in trades if t["status"] == "closed")
-    open_now = [t for t in trades if t["status"] == "open"]
-    cash = cfg["capital"] + realised - sum(t["entry"] * t["qty"] for t in open_now)
-    for c in confirmed:
-        name, direction, price, bar = c["name"], c["dir"], float(c["price"]), str(c["bar"])[:19]
-        if name not in n100 or not (cfg["window"][0] <= bar[11:16] < cfg["window"][1]):
-            continue  # outside the paper universe / time window: not a candidate at all
+        name, bar = h["name"], h["time"][:19]
+        if f"{name}|{bar}" in seen or name not in n100 or not (cfg["window"][0] <= bar[11:16] < cfg["window"][1]):
+            continue  # already handled, or outside the paper universe / time window
         tv = (state.get(name) or {}).get("tv20")
         if tv is not None and tv < cfg.get("min_traded_cr", 0):
             continue  # not liquid enough
-        if market_filter and not with_market(state, direction):
-            continue  # against the market (NIFTY vs its 20-day EMA)
+        direction = "sell" if "SELL" in h["label"] else "buy"
+        if market_filter and not with_market(state, direction, bar[:10]):
+            continue  # against the market (NIFTY's close before that day vs its 20-day EMA)
+        cands.append((bar, name, direction, float(h["price"])))
+    for bar, name, direction, price in sorted(cands):
+        day = bar[:10]
+        for t in trades:                      # the book as it stood at this candle
+            if t["status"] == "open":
+                out = _paper_exit(t, archive, cfg, upto=bar)
+                if out:
+                    _close_trade(t, out, cfg)
+        open_now = [t for t in trades if t["status"] == "open"]
+        realised = sum(t["pnl"] for t in trades if t["status"] == "closed")
+        cash = cfg["capital"] + realised - sum(t["entry"] * t["qty"] for t in open_now)
         today_trades = [t for t in trades if t["day"] == day]
+        loss_today = sum(t["pnl"] for t in trades if t["status"] == "closed" and t["exit_bar"][:10] == day)
         qty = int(cfg["per_trade"] // price) if price > 0 else 0
-        loss_today = sum(t["pnl"] for t in closed_today)
         reason = None
         if any(t["sym"] == name for t in today_trades):
             reason = "already traded today"
@@ -1018,17 +1044,19 @@ def update_paper(state, confirmed, now_str, cfg, key=PAPER_KEY, market_filter=Fa
         elif cash - qty * price < cfg["capital"] * cfg["cash_buffer_pct"] / 100:
             reason = "would dip into the cash buffer"
         if reason:
-            p["skipped"] = (p["skipped"] + [{"time": now_str, "sym": name, "dir": direction, "price": price,
-                                             "reason": reason}])[-200:]
+            p["skipped"] = (p["skipped"] + [{"time": bar, "key": f"{name}|{bar}", "sym": name, "dir": direction,
+                                             "price": price, "reason": reason}])[-300:]
             continue
         sign = 1 if direction == "buy" else -1
-        t = {"sym": name, "dir": direction, "day": day, "bar": bar, "opened": now_str, "entry": round(price, 2),
-             "qty": qty, "target": round(price * (1 + sign * cfg["target_pct"] / 100), 2),
-             "stop": round(price * (1 - sign * cfg["stop_pct"] / 100), 2), "status": "open"}
-        trades.append(t)
-        open_now.append(t)
-        cash -= qty * price
-    p["trades"] = trades[-2000:]
+        trades.append({"sym": name, "dir": direction, "day": day, "bar": bar, "opened": now_str, "entry": round(price, 2),
+                       "qty": qty, "target": round(price * (1 + sign * cfg["target_pct"] / 100), 2),
+                       "stop": round(price * (1 - sign * cfg["stop_pct"] / 100), 2), "status": "open"})
+    for t in trades:                          # everything up to now
+        if t["status"] == "open":
+            out = _paper_exit(t, archive, cfg)
+            if out:
+                _close_trade(t, out, cfg)
+    p["trades"] = trades[-3000:]
 
 
 # ── positional paper book: Chartink "Short term breakouts", held 20 sessions ──
@@ -3275,7 +3303,16 @@ if __name__ == "__main__":
         # Single scan for schedulers (GitHub Actions) — the cron decides timing,
         # this gate just drops runs that GitHub delayed past the session.
         now = datetime.now(IST)
-        if now.weekday() >= 5 or not ((9, 15) <= (now.hour, now.minute) <= ONCE_LATEST_RUN):
+        late = (now.hour, now.minute) > ONCE_LATEST_RUN
+        last = (load_state().get(SCAN_META_KEY, {}).get("time") or "") if STATE_FILE.exists() else ""
+        if late and last[:10] == f"{now:%Y-%m-%d}" and last[11:16] >= "15:35":
+            print(f"[{now:%Y-%m-%d %H:%M} IST] end-of-day scan already done at {last[11:16]} — skipping")
+            sys.exit(0)
+        if late and now.weekday() < 5:
+            # GitHub often starts scheduled runs hours late: rather than skip, do one
+            # end-of-day scan (final bars, breakouts, daily crosses, paper books catch up)
+            print(f"[{now:%Y-%m-%d %H:%M} IST] after the close — running the end-of-day scan")
+        if now.weekday() >= 5 or (now.hour, now.minute) < (9, 15):
             print(f"[{now:%Y-%m-%d %H:%M} IST] outside market hours — skipping scan")
             if STATE_FILE.exists():  # still (re)publish the page from the last scan
                 write_dashboard(load_state())
