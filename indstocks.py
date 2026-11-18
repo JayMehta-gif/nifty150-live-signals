@@ -48,8 +48,13 @@ def _request(path, params=None, body=None, headers=None, timeout=20):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method="POST" if body is not None else "GET",
                                  headers={"User-Agent": "technical-dashboard/1.0", **(headers or {})})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read().decode("utf-8")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        # say which call failed and what INDstocks answered (its reply carries no secrets)
+        detail = e.read()[:300].decode("utf-8", "replace")
+        raise urllib.error.HTTPError(e.url, e.code, f"{e.reason} on {path}: {detail}", e.headers, None) from None
 
 
 def token():
@@ -139,7 +144,7 @@ def quotes(codes, kind="full"):
                                       headers={"Authorization": token()}))
             out.update(res.get("data") or {})
         except urllib.error.HTTPError as e:
-            print(f"[warn] INDstocks quotes: HTTP {e.code} {e.read()[:200]!r}")
+            print(f"[warn] INDstocks quotes: HTTP {e.code} {e.msg}")
         except Exception as e:  # noqa: BLE001
             print(f"[warn] INDstocks quotes: {e}")
         time.sleep(0.25)   # 5 requests a second is the documented limit
