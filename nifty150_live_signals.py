@@ -823,7 +823,7 @@ def update_momentum(state, universe):
 
 # ─── live prices from INDmoney (INDstocks API), Yahoo as the fallback ─────────
 INDSTOCKS_KEY = "__INDSTOCKS__"
-INDEX_NAMES_INDSTOCKS = {"NIFTY 50": "NIFTY 50", "BANK NIFTY": "NIFTY BANK", "NIFTY NEXT 50": "NIFTY NEXT 50",
+INDEX_NAMES_INDSTOCKS = {"NIFTY 50": "NIFTY 50", "BANK NIFTY": "BANK NIFTY", "NIFTY NEXT 50": "NIFTY NEXT 50",
                          "NIFTY MIDCAP 150": "NIFTY MIDCAP 150", "NIFTY SMALLCAP 250": "NIFTY SMALLCAP 250",
                          "NIFTY 500": "NIFTY 500"}
 

@@ -84,10 +84,11 @@ def equity_codes(csv_text):
     for row in csv.DictReader(StringIO(csv_text)):
         if row.get("EXCH") != "NSE" or row.get("SERIES", "EQ") not in ("EQ", "BE", ""):
             continue
-        sym = (row.get("SYMBOL_NAME") or row.get("TRADING_SYMBOL") or "").strip()
+        # TRADING_SYMBOL is the NSE symbol (RELIANCE); SYMBOL_NAME is the company's name
+        sym = (row.get("TRADING_SYMBOL") or row.get("UNDERLYING_SCRIP_NAME") or "").strip().upper()
         sid = (row.get("SECURITY_ID") or "").strip()
-        if sym and sid and sym not in out:
-            out[sym] = f"NSE_{sid}"
+        if sym and sid and (sym not in out or row.get("SERIES") == "EQ"):
+            out[sym] = f"NSE_{sid}"   # an EQ row wins over a BE row for the same symbol
     return out
 
 

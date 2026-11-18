@@ -35,7 +35,7 @@ except Exception as e:  # noqa: BLE001
     sys.exit(1)
 try:
     idx = indstocks.index_ids(indstocks.instruments("index"))
-    print(f"3. instruments (index): OK — NIFTY 50 = {idx.get('NIFTY 50')}, NIFTY BANK = {idx.get('NIFTY BANK')}")
+    print(f"3. instruments (index): OK — NIFTY 50 = {idx.get('NIFTY 50')}, BANK NIFTY = {idx.get('BANK NIFTY')}, NIFTY 500 = {idx.get('NIFTY 500')}")
 except Exception as e:  # noqa: BLE001
     print("3. index instruments: FAILED —", e)
     idx = {}
