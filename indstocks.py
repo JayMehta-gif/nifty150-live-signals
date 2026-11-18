@@ -97,6 +97,36 @@ def index_ids(csv_text):
     return out
 
 
+WINDOW_MS = {"1minute": 7, "15minute": 7, "60minute": 15, "1day": 365}  # max days per call (docs)
+
+
+def candles(codes, interval, start_ms, end_ms):
+    """{code: [candle dicts with ts (epoch s, candle open), o, h, l, c, v]} for up
+    to 5 codes, paging through the allowed window size. Retries once on 429."""
+    if len(codes) > 5:
+        raise ValueError("at most 5 codes per historical call")
+    step = WINDOW_MS.get(interval, 7) * 86400000
+    out = {c: [] for c in codes}
+    t = start_ms
+    while t < end_ms:
+        t_end = min(t + step, end_ms)
+        params = {"scrip-codes": ",".join(codes), "start_time": t, "end_time": t_end}
+        for attempt in range(3):
+            try:
+                res = json.loads(_request(f"/market/historical/{interval}", params, headers={"Authorization": token()}))
+                for code, d in (res.get("data") or {}).items():
+                    out.setdefault(code, []).extend((d or {}).get("candles") or [])
+                break
+            except urllib.error.HTTPError as e:
+                if e.code == 429 and attempt < 2:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                raise
+        time.sleep(0.21)   # 5 requests a second
+        t = t_end
+    return out
+
+
 def quotes(codes, kind="full"):
     """{code: quote dict} for up to any number of codes, 1000 per call. A call
     that fails is skipped (one bad code fails a whole call, per the docs)."""

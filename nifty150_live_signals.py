@@ -402,6 +402,91 @@ def save_bars_cache():
         pd.to_pickle(BARS_CACHE, BARS_CACHE_FILE)
 
 
+IND_BARS = {}               # yf_ticker -> 15-min DataFrame from INDmoney, filled by prefetch_15m for this run
+FETCH_USED_NETWORK = True   # False when fetch_15m was served from the prefetch (no pacing needed)
+IND_CODES_KEY = "__INDSTOCKS_CODES__"   # kept in the bar cache: {date, eq: {symbol: code}, idx_prefix, idx: {...}}
+
+
+def _indstocks_codes(indstocks):
+    """{yf_ticker: INDstocks scrip code} for NSE stocks and the indices, refreshed daily."""
+    cache = load_bars_cache()
+    today = str(datetime.now(IST).date())
+    rec = cache.get(IND_CODES_KEY)
+    if not isinstance(rec, dict) or rec.get("date") != today:
+        rec = {"date": today, "eq": indstocks.equity_codes(indstocks.instruments("equity")),
+               "idx": indstocks.index_ids(indstocks.instruments("index")),
+               "idx_prefix": (rec or {}).get("idx_prefix") if isinstance(rec, dict) else None}
+        cache[IND_CODES_KEY] = rec
+    out = {f"{sym}.NS": code for sym, code in rec["eq"].items()}
+    if rec.get("idx_prefix") is None:          # docs don't say which prefix index candles take: probe once
+        now_ms = int(time.time() * 1000)
+        nid = rec["idx"].get("NIFTY 50")
+        for prefix in ("NIDX_", "NSE_", "IDX_"):
+            try:
+                got = indstocks.candles([f"{prefix}{nid}"], "15minute", now_ms - 5 * 86400000, now_ms) if nid else {}
+            except Exception:  # noqa: BLE001
+                got = {}
+            if any(got.values()):
+                rec["idx_prefix"] = prefix
+                break
+        else:
+            rec["idx_prefix"] = ""             # none worked: indices stay on Yahoo
+    if rec.get("idx_prefix"):
+        for name, yt in INDEX_TICKERS.items():
+            ix = rec["idx"].get(INDEX_NAMES_INDSTOCKS.get(name, name))
+            if ix:
+                out[yt] = f'{rec["idx_prefix"]}{ix}'
+    return out
+
+
+def prefetch_15m(names):
+    """Download this run's 15-min candles from INDmoney in batches of 5: the full
+    ~40 sessions for symbols not yet fully fetched today, just today's bars for
+    the rest (the same rule fetch_15m uses). Fills IND_BARS; anything missing
+    falls back to Yahoo inside fetch_15m. Returns a label for the page header."""
+    import indstocks
+    IND_BARS.clear()
+    if not indstocks.available():
+        return "Yahoo · ~15 min delayed"
+    try:
+        codes = _indstocks_codes(indstocks)
+        cache = load_bars_cache()
+        today = datetime.now(IST).date()
+        full, inc = [], []
+        for _, yt in names:
+            code = codes.get(yt)
+            if not code:
+                continue
+            c = cache.get(yt)
+            (inc if c is not None and len(c) and c.attrs.get("full_fetch") == str(today) else full).append((yt, code))
+        now_ms = int(time.time() * 1000)
+        day_start = int(datetime.combine(today, datetime.min.time()).replace(tzinfo=IST).timestamp() * 1000)
+        t0 = time.time()
+        for group, start in ((inc, day_start), (full, now_ms - 60 * 86400000)):
+            for i in range(0, len(group), 5):
+                chunk = group[i:i + 5]
+                try:
+                    got = indstocks.candles([c for _, c in chunk], "15minute", start, now_ms)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[warn] INDstocks candles {[y for y, _ in chunk]}: {e}")
+                    continue
+                for yt, code in chunk:
+                    rows = got.get(code) or []
+                    if not rows:
+                        continue
+                    df = pd.DataFrame(rows).rename(columns={"o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"})
+                    df.index = pd.to_datetime(df["ts"], unit="s", utc=True).dt.tz_convert(IST)
+                    df = df[~df.index.duplicated(keep="last")].sort_index().between_time("09:15", "15:30")
+                    IND_BARS[yt] = df[["open", "high", "low", "close", "volume"]].astype(float)
+        print(f"[indstocks] 15-min candles for {len(IND_BARS)} symbols ({len(full)} full, {len(inc)} today only) "
+              f"in {time.time() - t0:.0f}s")
+        return f"INDmoney · {len(IND_BARS)} symbols" if IND_BARS else "Yahoo · ~15 min delayed (INDmoney returned no candles)"
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] INDstocks candles failed: {e}")
+        IND_BARS.clear()
+        return "Yahoo · ~15 min delayed (INDmoney unavailable)"
+
+
 def fetch_15m(symbol, yf_ticker=None):
     """15-min bars for the last ~15 sessions. Downloads the full FETCH_PERIOD
     only on the first fetch of the day (which also picks up any split/bonus
@@ -413,7 +498,10 @@ def fetch_15m(symbol, yf_ticker=None):
     cached = cache.get(yf_ticker)
     today = datetime.now(IST).date()
     fresh_today = cached is not None and len(cached) and cached.attrs.get("full_fetch") == str(today)
-    df = _download(symbol, yf_ticker, "1d" if fresh_today else FETCH_PERIOD)
+    global FETCH_USED_NETWORK
+    pre = IND_BARS.pop(yf_ticker, None)     # INDmoney candles from prefetch_15m (same window rule)
+    FETCH_USED_NETWORK = pre is None
+    df = pre if pre is not None else _download(symbol, yf_ticker, "1d" if fresh_today else FETCH_PERIOD)
     if fresh_today:
         if df is None or df.empty:
             return cached
@@ -2593,7 +2681,7 @@ document.documentElement.dataset.theme=t;}}catch(e){{}}</script>
 <body data-scanned="{e(scanned_iso)}">
 <div class="top"><div class="wrap">
 <div class="bar1"><div class="brand"><div class="logo"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l5-5 4 4 8-9"/><path d="M15 7h5v5"/></svg></div><div style="min-width:0"><h1>Technical Dashboard</h1>
-<div class="sub">SuperTrend ({ATR_PERIOD}×{MULTIPLIER:g}) + ADX DI · {sub} · prices: {e(meta.get("prices", "Yahoo · ~15 min delayed"))}</div></div></div>
+<div class="sub">SuperTrend ({ATR_PERIOD}×{MULTIPLIER:g}) + ADX DI · {sub} · prices: {e(meta.get("prices", "Yahoo · ~15 min delayed"))} · candles: {e((meta.get("candles") or "Yahoo · ~15 min delayed").split(" · ")[0])}</div></div></div>
 <div class="tools-r"><button class="fbtn on" id="focus" title="Focus: only Nifty 100 stocks + indices, and only signals from 9:45 AM to 2:30 PM. Click to show everything.">Focus</button>
 <span class="status" id="status"><i></i><span class="lbl">Waiting</span></span>
 <button class="iconbtn theme" id="theme" title="Light / dark" aria-label="Switch light or dark theme">
@@ -3044,6 +3132,8 @@ def scan_once(per_symbol_delay=None, backfill=False):
     else:
         rest_delay = watch_delay = per_symbol_delay
 
+    candle_src = "Yahoo · ~15 min delayed" if backfill else prefetch_15m(
+        [(s, f"{s}.NS") for s in scan_order] + list(INDEX_TICKERS.items()))
     for idx, symbol in enumerate(scan_order):
         try:
             df = _download(symbol, f"{symbol}.NS", BACKFILL_PERIOD) if backfill else fetch_15m(symbol)
@@ -3072,7 +3162,7 @@ def scan_once(per_symbol_delay=None, backfill=False):
         except Exception as e:
             print(f"[warn] {symbol}: {e}")
 
-        if idx < len(scan_order) - 1:
+        if idx < len(scan_order) - 1 and (backfill or FETCH_USED_NETWORK):
             delay = watch_delay if idx < len(watchlist) else rest_delay
             time.sleep(delay * random.uniform(0.7, 1.3))
 
@@ -3098,6 +3188,7 @@ def scan_once(per_symbol_delay=None, backfill=False):
                             "universe": universe, "n100": n100}
 
     state[SCAN_META_KEY]["prices"] = apply_live_quotes(state, universe, now_str)
+    state[SCAN_META_KEY]["candles"] = candle_src
 
     # double confirmations completed by this scan's signals
     new_conf = [c for c in find_confluence(state[SIGNAL_LOG_KEY]).get(now_str[:10], []) if c["time"] == now_str]
@@ -3204,6 +3295,7 @@ if __name__ == "__main__":
         # no alerts, no dashboard; just fills the bar cache.
         uni = load_universe()
         names = [(s, f"{s}.NS") for s in uni] + list(INDEX_TICKERS.items()) + list(MOM_BENCH.items())
+        print("[warm] 15-min candles:", prefetch_15m(names))
         t0 = time.time()
         for k, (name, yt) in enumerate(names, 1):
             try:
