@@ -1617,6 +1617,19 @@ a.tv{color:inherit;text-decoration:none}a.tv:hover{text-decoration:underline;col
 tr.secrow{cursor:pointer}tr.secrow.on td{background:var(--accent-bg)}
 #eq svg{display:block;width:100%;height:220px}
 svg.spark{display:block;width:100%;height:160px}
+.mf-hero{display:flex;justify-content:space-between;align-items:center;gap:18px;padding:18px 20px;flex-wrap:wrap}
+.mf-hero-l{min-width:260px;flex:1}.eyebrow{font-size:11px;font-weight:700;letter-spacing:.06em;color:var(--muted)}
+.mf-head{font-size:22px;line-height:1.25;margin:6px 0 6px;letter-spacing:-.02em}
+.mf-tiles{display:flex;gap:10px;flex-wrap:wrap}.mf-tile{border:1px solid var(--line);border-radius:10px;padding:9px 13px;min-width:110px}
+.mf-tile .k{font-size:11px;color:var(--muted);font-weight:600}.mf-tile .v{font-size:19px;font-weight:700}.mf-tile .s{font-size:12px}
+.mf-panel{padding:10px 8px;overflow-x:auto}#mf-sankey svg{display:block;width:100%;min-width:640px;height:auto}
+#mf-sankey text{font:600 11px Inter,system-ui,sans-serif;fill:var(--fg)}#mf-sankey .mu{fill:var(--muted);font-weight:500}
+#mf-sankey .lnk{fill:none;opacity:.22}#mf-sankey .lnk:hover{opacity:.45}
+.mf-bubbles{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:10px;padding:18px;min-height:220px}
+.bub{border-radius:50%;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;
+font-size:11px;font-weight:700;line-height:1.2;border:1px solid}
+.bub.up{background:var(--up-bg);border-color:var(--up-bd);color:var(--up)}.bub.dn{background:var(--dn-bg);border-color:var(--dn-bd);color:var(--dn)}
+.bub b{color:var(--fg);font-size:12px}
 .mkt{font-size:13px;padding:9px 13px;border-radius:10px;margin:0 0 10px;border:1px solid var(--line);background:var(--panel)}
 .mkt.up{border-left:3px solid var(--up)}.mkt.dn{border-left:3px solid var(--dn)}
 .book[hidden]{display:none}
@@ -1641,6 +1654,64 @@ code{font:12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:v
 """.replace("DARK", """--bg:#000;--panel:#000;--fg:#f1f5f9;--muted:#8a94a6;--faint:#5b6577;--line:#1c1f26;
 --head:#07080a;--hover:#0d0f13;--up:#34d399;--up-bg:#04170f;--up-bd:#0b3a26;--dn:#f87171;--dn-bg:#1c0607;
 --dn-bd:#4a1416;--accent:#818cf8;--accent-bg:#0e0f24;--hl:#141005;--warn:#fbbf24;--warn-bg:#191204;--shadow:none""")
+
+# Money-flow chart (Sankey + bubbles), drawn in the browser from the MF data. A raw string,
+# so its backslashes (<\/ inside JS strings) reach the page untouched.
+MONEYFLOW_JS = r'''(()=>{if(typeof MF==='undefined'||!MF)return;
+const el=document.getElementById('mf-sankey');if(!el)return;
+const still=matchMedia('(prefers-reduced-motion: reduce)').matches;
+const cr=v=>'₹'+Math.round(Math.abs(v)).toLocaleString('en-IN');
+const esc=t=>String(t).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const secs=MF.secs,tin=MF.top_in,tout=MF.top_out;
+const rowH=26,top=34,W=1000;
+const H=Math.max(top+secs.length*rowH+20,top+(tin.length+tout.length)*rowH+90);
+const avail=H-top-30,gap=36,tot=(MF.in+MF.out)||1;
+const inH=Math.max(8,(avail-gap)*MF.in/tot),outH=Math.max(8,(avail-gap)*MF.out/tot);
+const inY=top,outY=top+inH+gap,cx=600,bw=12;
+const lx=175,maxS=Math.max(...secs.map(s=>Math.max(s.in,s.out)),1);
+let svg='',dots='';
+const curve=(x1,y1,x2,y2)=>{const m=(x1+x2)/2;return 'M'+x1+','+y1.toFixed(1)+' C'+m+','+y1.toFixed(1)+' '+m+','+y2.toFixed(1)+' '+x2+','+y2.toFixed(1)};
+const link=(d,w,col,speed,n)=>{svg+='<path class="lnk" d="'+d+'" stroke="'+col+'" stroke-width="'+Math.max(1.2,w).toFixed(1)+'"/>';
+ if(still)return;for(let k=0;k<n;k++){const dur=(6/speed).toFixed(1);
+  dots+='<circle r="2.2" fill="'+col+'" opacity=".85"><animateMotion dur="'+dur+'s" begin="-'+(k*dur/n).toFixed(1)+'s" repeatCount="indefinite" path="'+d+'"/><\/circle>'}};
+/* left: sectors, each with an inflow and an outflow mini-bar */
+let oi=0,oo=0;
+secs.forEach((s,i)=>{const y=top+i*rowH+rowH/2;
+ svg+='<text x="8" y="'+(y+4)+'">'+esc(s.sec)+'<\/text>';
+ const gi=Math.max(1,70*s.in/maxS),go=Math.max(1,70*s.out/maxS);
+ svg+='<rect x="'+(lx-75)+'" y="'+(y-6)+'" width="'+gi.toFixed(1)+'" height="5" rx="2" fill="var(--up)"/>';
+ svg+='<rect x="'+(lx-75)+'" y="'+(y+1)+'" width="'+go.toFixed(1)+'" height="5" rx="2" fill="var(--dn)"/>';
+ svg+='<text class="mu" x="'+(lx+2)+'" y="'+(y+1)+'" style="font-size:10px">+'+cr(s.in)+'<\/text>';
+ svg+='<text class="mu" x="'+(lx+2)+'" y="'+(y+11)+'" style="font-size:10px">−'+cr(s.out)+'<\/text>';
+ const wi=inH*s.in/(MF.in||1),wo=outH*s.out/(MF.out||1);
+ link(curve(lx+62,y-3,cx,inY+oi+wi/2),wi,'var(--up)',1,wi>6?2:1);oi+=wi;
+ link(curve(lx+62,y+4,cx,outY+oo+wo/2),wo,'var(--dn)',1,wo>6?2:1);oo+=wo});
+/* centre: the inflow and outflow totals */
+svg+='<rect x="'+cx+'" y="'+inY+'" width="'+bw+'" height="'+inH.toFixed(1)+'" rx="3" fill="var(--up)"/>';
+svg+='<rect x="'+cx+'" y="'+outY+'" width="'+bw+'" height="'+outH.toFixed(1)+'" rx="3" fill="var(--dn)"/>';
+const rx=cx+bw,sx=770;
+const side=(list,y0,h,total,col,label,sign)=>{
+ svg+='<text class="mu" x="'+(sx-10)+'" y="'+(y0-12)+'" style="font-size:10px;letter-spacing:.06em">'+label+'<\/text>';
+ svg+='<text x="'+(sx-10)+'" y="'+(y0+4)+'" style="font-size:17px;font-weight:800">'+cr(total)+' cr<\/text>';
+ let off=0;list.forEach((r,i)=>{const y=y0+22+i*rowH;const w=Math.max(1.2,h*Math.abs(r.net)/(total||1));
+  const sp=Math.max(.5,Math.min(3,r.surge||1));
+  link(curve(rx,y0+off+w/2,sx,y),w,col,sp,w>5?2:1);off+=w;
+  if(r.surge>=2)svg+='<circle cx="'+sx+'" cy="'+y+'" r="7" fill="#f59e0b" opacity=".35"><animate attributeName="r" values="5;9;5" dur="2s" repeatCount="indefinite"/><\/circle>';
+  svg+='<circle cx="'+sx+'" cy="'+y+'" r="3.2" fill="'+col+'"/>';
+  svg+='<text x="'+(sx+10)+'" y="'+(y+4)+'">'+esc(r.sym)+(r.surge>=2?' ⚡':'')+'<\/text>';
+  svg+='<text x="'+(W-6)+'" y="'+(y+4)+'" text-anchor="end" class="'+(sign>0?'':'')+'" style="fill:'+col+'">'+(sign>0?'+':'−')+cr(r.net)+'<\/text>'})};
+side(tin,inY+14,inH,MF.in,'var(--up)','INFLOW',1);
+side(tout,Math.max(outY+14,inY+14+22+tin.length*rowH+40),outH,MF.out,'var(--dn)','OUTFLOW',-1);
+el.innerHTML='<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Money flow from sectors to the stocks with the largest inflow and outflow">'+svg+dots+'<\/svg>';
+/* fastest movers: bubbles sized by flow */
+const bub=(id,list,cls)=>{const box=document.getElementById(id);if(!box)return;
+ const mx=Math.max(...list.map(r=>Math.abs(r.net)),1);
+ box.innerHTML=list.map(r=>{const d=Math.round(64+70*Math.sqrt(Math.abs(r.net)/mx));
+  return '<div class="bub '+cls+'" style="width:'+d+'px;height:'+d+'px" title="'+esc(r.sym)+' · net '+(r.net>=0?'+':'−')+cr(r.net)+' cr"><b>'+esc(r.sym)+'<\/b>'+(r.chg>0?'+':'')+(r.chg==null?'—':r.chg.toFixed(1)+'%')+'<\/div>'}).join('')
+  ||'<div class="empty">None today.<\/div>'};
+bub('mf-up',MF.movers_up,'up');bub('mf-dn',MF.movers_dn,'dn');
+})();
+'''
 
 DASHBOARD_JS = """
 const $=(s,r=document)=>r.querySelector(s),$$=(s,r=document)=>[...r.querySelectorAll(s)];
@@ -2367,6 +2438,117 @@ def _alerts_html(state, cfg):
             f'<th>Status</th><th>Note</th></tr></thead><tbody>{body}</tbody></table></div></section>')
 
 
+# ─── money flow (the "Market Pulse" view): where today's money went ─────────
+SECTOR_SHORT = {"Financial Services": "Financials", "Capital Goods": "Cap goods", "Healthcare": "Healthcare",
+                "Automobile and Auto Components": "Auto", "Fast Moving Consumer Goods": "FMCG", "Chemicals": "Chemicals",
+                "Information Technology": "IT", "Consumer Services": "Consumer svcs", "Metals & Mining": "Metals",
+                "Power": "Power", "Oil Gas & Consumable Fuels": "Oil & gas", "Consumer Durables": "Durables",
+                "Services": "Services", "Realty": "Realty", "Construction": "Construction",
+                "Construction Materials": "Cement", "Telecommunication": "Telecom", "Textiles": "Textiles",
+                "Media Entertainment & Publication": "Media", "Diversified": "Diversified"}
+
+
+def money_flow(state, stocks, sectors):
+    """Estimated money flow for the latest session from each stock's 15-min
+    candles: every candle's traded value (close × volume) is split into buying
+    and selling by where it closed in its high–low range (the Chaikin money-flow
+    multiplier: +1 at the high, −1 at the low). Not real order data — an estimate
+    from price and volume, like any 'money flow' screen."""
+    cache = load_bars_cache()
+    day = None
+    for sym in stocks:
+        b = cache.get(f"{sym}.NS")
+        if b is not None and len(b):
+            d = b.index[-1].date()
+            day = d if day is None or d > day else day
+    if day is None:
+        return None
+    rows = []
+    for sym, info in stocks.items():
+        b = cache.get(f"{sym}.NS")
+        if b is None or not len(b) or b.index[-1].date() != day:
+            continue
+        t = b[b.index.date == day]
+        rng = (t["high"] - t["low"]).replace(0, np.nan)
+        mult = (((t["close"] - t["low"]) - (t["high"] - t["close"])) / rng).fillna(0.0)
+        val = t["close"] * t["volume"] / 1e7                      # ₹ crore per candle
+        inflow, outflow = float((val * mult.clip(lower=0)).sum()), float((val * (-mult).clip(lower=0)).sum())
+        tv20 = info.get("tv20")
+        turnover = float(val.sum())
+        rows.append({"sym": sym, "sec": SECTOR_SHORT.get(sectors.get(sym, ""), sectors.get(sym) or "Other"),
+                     "in": round(inflow, 1), "out": round(outflow, 1), "net": round(inflow - outflow, 1),
+                     "chg": info.get("day_chg_pct"), "px": _current_price(state, sym),
+                     "surge": round(turnover / tv20, 2) if tv20 else None})
+    if not rows:
+        return None
+    sec = {}
+    for r in rows:
+        g = sec.setdefault(r["sec"], {"sec": r["sec"], "in": 0.0, "out": 0.0, "n": 0})
+        g["in"] += r["in"]; g["out"] += r["out"]; g["n"] += 1
+    secs = sorted(({**g, "in": round(g["in"], 1), "out": round(g["out"], 1), "net": round(g["in"] - g["out"], 1)}
+                   for g in sec.values()), key=lambda g: -g["net"])
+    tin, tout = sum(r["in"] for r in rows), sum(r["out"] for r in rows)
+    adv = sum(1 for r in rows if (r["chg"] or 0) > 0)
+    dec = sum(1 for r in rows if (r["chg"] or 0) < 0)
+    nifty = (state.get(INDEX_STATE_PREFIX + "NIFTY 50") or {}).get("day_chg_pct") or 0.0
+    # mood 0–100: half breadth, a third net-flow share, the rest NIFTY's move (±1.5% = full swing)
+    mood = 50 + 25 * ((adv - dec) / max(adv + dec, 1)) + 15 * ((tin - tout) / max(tin + tout, 1)) \
+        + 10 * max(-1.0, min(1.0, nifty / 1.5))
+    mood = int(round(max(0, min(100, mood))))
+    word = "Strong" if mood >= 65 else "Constructive" if mood >= 52 else "Cautious" if mood >= 38 else "Weak"
+    losers = [g["sec"] for g in secs[::-1] if g["net"] < 0][:2]
+    gainers = [g["sec"] for g in secs if g["net"] > 0][:2]
+    net = tin - tout
+    if losers and gainers:
+        head = f"Money left {' and '.join(losers)} and moved into {' and '.join(gainers)}."
+    elif gainers:
+        head = f"Money flowed into {' and '.join(gainers)}."
+    elif losers:
+        head = f"Money left {' and '.join(losers)}."
+    else:
+        head = "Money flow was flat."
+    top_in = sorted((r for r in rows if r["net"] > 0), key=lambda r: -r["net"])[:8]
+    top_out = sorted((r for r in rows if r["net"] < 0), key=lambda r: r["net"])[:8]
+    movers_up = sorted((r for r in rows if (r["chg"] or 0) > 0), key=lambda r: -(r["chg"] or 0))[:6]
+    movers_dn = sorted((r for r in rows if (r["chg"] or 0) < 0), key=lambda r: (r["chg"] or 0))[:6]
+    return {"day": str(day), "in": round(tin), "out": round(tout), "net": round(net), "adv": adv, "dec": dec,
+            "unch": len(rows) - adv - dec, "n": len(rows), "mood": mood, "word": word,
+            "head": f"{head} Net flow {'+' if net >= 0 else '−'}₹{abs(net):,.0f} cr.",
+            "secs": secs, "top_in": top_in, "top_out": top_out, "movers_up": movers_up, "movers_dn": movers_dn}
+
+
+def _moneyflow_view_html(state, mf):
+    e = html_lib.escape
+    if not mf:
+        return '<div class="panel empty">Money flow appears after the first scan with 15-minute data.</div>'
+    ix = {n: state.get(INDEX_STATE_PREFIX + n) or {} for n in ("NIFTY 50", "BANK NIFTY")}
+    tiles = "".join(
+        f'<div class="mf-tile"><div class="k">{e(n)}</div><div class="v">{_fmt_price(_current_price(state, n))}</div>'
+        f'<div class="s">{_pct(i.get("day_chg_pct"))}</div></div>' for n, i in ix.items())
+    net_cls = "up" if mf["net"] >= 0 else "dn"
+    return f"""<div class="panel mf-hero"><div class="mf-hero-l"><div class="eyebrow">MONEY FLOW · {e(fmt_day(mf["day"]))}</div>
+<h2 class="mf-head">{e(mf["head"])}</h2>
+<div class="sm">Estimated from price × volume on 15-minute candles across {mf["n"]} stocks — not actual order data.</div></div>
+<div class="mf-tiles"><div class="mf-tile"><div class="k">Mood</div><div class="v">{mf["mood"]}<span class="mu" style="font-size:13px">/100</span></div>
+<div class="s">{e(mf["word"])}</div></div>{tiles}</div></div>
+<div class="kpis" style="margin-top:14px">
+<div class="panel kpi"><div class="k">Inflow</div><div class="v up">{_inr(mf["in"])} cr</div><div class="s">buying pressure</div></div>
+<div class="panel kpi"><div class="k">Outflow</div><div class="v dn">{_inr(mf["out"])} cr</div><div class="s">selling pressure</div></div>
+<div class="panel kpi"><div class="k">Net flow</div><div class="v {net_cls}">{"+" if mf["net"] >= 0 else "−"}{_inr(abs(mf["net"]))} cr</div>
+<div class="split"><b style="width:{mf["in"] / max(mf["in"] + mf["out"], 1) * 100:.1f}%"></b><i style="width:{mf["out"] / max(mf["in"] + mf["out"], 1) * 100:.1f}%"></i></div></div>
+<div class="panel kpi"><div class="k">Breadth</div><div class="v">{mf["adv"]} : {mf["dec"]}</div><div class="s">advancers : decliners · {mf["unch"]} unchanged</div>
+<div class="split"><b style="width:{mf["adv"] / max(mf["adv"] + mf["dec"], 1) * 100:.1f}%"></b><i style="width:{mf["dec"] / max(mf["adv"] + mf["dec"], 1) * 100:.1f}%"></i></div></div></div>
+<section><div class="sh"><h2>Where the money went</h2><span class="meta">thickness = ₹ flow · dot speed = volume vs its 20-day average · glow = volume surge (2×+)</span></div>
+<div class="panel mf-panel"><div id="mf-sankey"></div></div></section>
+<section><div class="sh"><h2>Fastest movers</h2><span class="meta">bubble size = ₹ flow</span></div>
+<div class="grid2"><div class="panel mf-bubbles" id="mf-up"></div><div class="panel mf-bubbles" id="mf-dn"></div></div></section>
+<details class="note below"><summary>How this is worked out</summary>Each 15-minute candle's traded value (close × volume)
+is counted as buying when the candle closes near its high and as selling when it closes near its low, in proportion
+(the Chaikin money-flow multiplier). Summed over the day this gives each stock's inflow and outflow; sectors are NSE's
+industry groups. Mood blends breadth (half), the net-flow share (a third) and NIFTY's move. It describes what happened
+today — it is not a forecast or a trade signal.</details>"""
+
+
 def write_dashboard(state):
     """Render dashboard.html from the state file — a static page with four tabs:
     Live (indices, today's confirmations and signals), Past signals (day-wise
@@ -2589,7 +2771,8 @@ def write_dashboard(state):
     def gz(text):
         return base64.b64encode(gzip.compress(text.encode("utf-8"), 9)).decode("ascii")
 
-    data_js = ("const NAMES=" + json.dumps(names) + ";const ARCH_GZ=\"" + gz(json.dumps(arch_rows, separators=(",", ":"))) + "\""
+    mf = money_flow(state, stocks, meta.get("sectors", {}))
+    data_js = ("const MF=" + json.dumps(mf, separators=(",", ":")) + ";const NAMES=" + json.dumps(names) + ";const ARCH_GZ=\"" + gz(json.dumps(arch_rows, separators=(",", ":"))) + "\""
                + ";const PX=" + json.dumps(prices, separators=(",", ":"))
                + ";const PDAYS=new Set(" + json.dumps(past_days) + ");const N100=new Set(" + json.dumps(n100 + list(INDEX_TICKERS))
                + ");const FOCUS_WIN=" + json.dumps([FOCUS_FROM, FOCUS_TO]) + ";const SIM_LEVELS="
@@ -2719,6 +2902,7 @@ stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
 <circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
 </button></div></div>
 <nav class="tabs"><button class="tab" data-v="live"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8"/></svg>Live</button>
+<button class="tab" data-v="flow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h6c4 0 4 10 8 10h4"/><path d="M3 17h6c4 0 4-10 8-10h4"/></svg>Money flow</button>
 <button class="tab" data-v="paper"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5M4 19h16M8 15l4-4 3 3 5-6"/></svg>Paper trades{f'<span class="n">{n_paper_open}</span>' if n_paper_open else ""}</button>
 <button class="tab" data-v="past"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Past signals</button>
 <button class="tab" data-v="accuracy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/></svg>Accuracy</button>
@@ -2829,6 +3013,10 @@ it assumes the stop — the cautious choice); otherwise at the flip. Open signal
 Ignores brokerage, taxes and slippage. <b>Focus</b> (top right) applies here too.</details>
 </div>
 
+<div class="view" id="v-flow">
+{_moneyflow_view_html(state, mf)}
+</div>
+
 <div class="view" id="v-paper">
 {_paper_tab_html(state, tcfg["paper"], tcfg["positional"])}
 </div>
@@ -2860,6 +3048,7 @@ trend read, not a trade signal: in backtests (ema_cross_report.md) trading the c
 SELL signals and the accuracy figures are not from the original backtests. Not investment advice.</div>
 </main>
 <script>{data_js}</script>
+<script>{MONEYFLOW_JS}</script>
 <script>const STOCKS_GZ="{gz("".join(stock_rows))}";</script>
 <script>const NEAR={WATCHLIST_PCT};
 (async()=>{{
