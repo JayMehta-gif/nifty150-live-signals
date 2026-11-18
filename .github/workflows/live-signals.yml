@@ -63,6 +63,10 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # optional: INDmoney (INDstocks API) live prices; Yahoo is used when these are missing
+          INDSTOCKS_CLIENT_ID: ${{ secrets.INDSTOCKS_CLIENT_ID }}
+          INDSTOCKS_MPIN: ${{ secrets.INDSTOCKS_MPIN }}
+          INDSTOCKS_TOTP_SECRET: ${{ secrets.INDSTOCKS_TOTP_SECRET }}
           # optional repository variables (Settings → Secrets and variables → Actions → Variables):
           # TELEGRAM_MODE = all (default) | gated (1-hour gate) | confirmed ; TELEGRAM_UNTIL = HH:MM cut-off
           TELEGRAM_MODE: ${{ vars.TELEGRAM_MODE }}

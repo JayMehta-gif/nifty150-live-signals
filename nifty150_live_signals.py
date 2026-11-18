@@ -733,6 +733,65 @@ def update_momentum(state, universe):
     }
 
 
+# ─── live prices from INDmoney (INDstocks API), Yahoo as the fallback ─────────
+INDSTOCKS_KEY = "__INDSTOCKS__"
+INDEX_NAMES_INDSTOCKS = {"NIFTY 50": "NIFTY 50", "BANK NIFTY": "NIFTY BANK", "NIFTY NEXT 50": "NIFTY NEXT 50",
+                         "NIFTY MIDCAP 150": "NIFTY MIDCAP 150", "NIFTY SMALLCAP 250": "NIFTY SMALLCAP 250",
+                         "NIFTY 500": "NIFTY 500"}
+
+
+def apply_live_quotes(state, universe, now_str):
+    """Overlay INDmoney live prices on this scan's state: `ltp`, `prev_close`
+    and the day's change for every stock (and the indices when their codes
+    resolve). Signals still come from the 15-min candles; this makes the
+    dashboard's "now" prices, moves, alerts and paper P&L live. Returns a short
+    label for the page header. Never raises."""
+    import indstocks
+    if not indstocks.available():
+        return "Yahoo · ~15 min delayed"
+    try:
+        cache = state.get(INDSTOCKS_KEY) or {}
+        if cache.get("date") != now_str[:10] or not cache.get("eq"):
+            cache = {"date": now_str[:10], "eq": indstocks.equity_codes(indstocks.instruments("equity")),
+                     "idx": indstocks.index_ids(indstocks.instruments("index")),
+                     "idx_prefix": cache.get("idx_prefix")}
+            state[INDSTOCKS_KEY] = cache
+        eq = cache["eq"]
+        codes = {eq[s]: s for s in universe if s in eq}
+        got = indstocks.quotes(list(codes))
+        n = 0
+        for code, q in got.items():
+            sym = codes.get(code)
+            info = state.get(sym)
+            if not sym or not isinstance(info, dict) or not q.get("live_price"):
+                continue
+            info.update(ltp=float(q["live_price"]), ltp_at=now_str, prev_close=q.get("prev_close"))
+            if q.get("day_change_percentage") is not None:
+                info["day_chg_pct"] = float(q["day_change_percentage"])
+            n += 1
+        # indices: the docs don't say which prefix quotes take, so try and remember
+        ids = {INDEX_STATE_PREFIX + name: cache["idx"].get(ix) for name, ix in INDEX_NAMES_INDSTOCKS.items()}
+        for prefix in ([cache["idx_prefix"]] if cache.get("idx_prefix") else []) + ["NSE_", "NIDX_", "IDX_"]:
+            want = {f"{prefix}{i}": k for k, i in ids.items() if i}
+            if not want:
+                break
+            res = indstocks.quotes(list(want))
+            if res:
+                cache["idx_prefix"] = prefix
+                for code, q in res.items():
+                    info = state.get(want.get(code))
+                    if isinstance(info, dict) and q.get("live_price"):
+                        info.update(ltp=float(q["live_price"]), ltp_at=now_str)
+                        if q.get("day_change_percentage") is not None:
+                            info["day_chg_pct"] = float(q["day_change_percentage"])
+                break
+        print(f"[indstocks] live prices for {n}/{len(universe)} stocks")
+        return f"INDmoney live · {fmt_time(now_str)}" if n else "Yahoo · ~15 min delayed (INDmoney returned no prices)"
+    except Exception as e:  # noqa: BLE001 — Yahoo prices stay in place
+        print(f"[warn] INDstocks live prices failed: {e}")
+        return "Yahoo · ~15 min delayed (INDmoney unavailable)"
+
+
 # ─── trading_config.json: paper portfolio, momentum budget, price alerts ────────
 
 CONFIG_FILE = Path(__file__).parent / "trading_config.json"
@@ -1003,7 +1062,7 @@ def momentum_orders(view, state, cfg):
     sleeve = budget * (1 - cfg["cash_buffer_pct"] / 100)
 
     def px(sym):
-        return (state.get(sym) or {}).get("last_close")
+        return _current_price(state, sym)
 
     def size(syms):
         w = min(1 / len(syms), cfg["max_position_pct"] / 100 * budget / sleeve) if syms else 0
@@ -1064,7 +1123,7 @@ def check_alerts(state, cfg, now_str):
     for a in cfg["alerts"]:
         sym = a["symbol"].strip().upper()
         info = state.get(sym) or state.get(INDEX_STATE_PREFIX + sym) or {}
-        price, chg = info.get("last_close"), info.get("day_chg_pct")
+        price, chg = info.get("ltp") or info.get("last_close"), info.get("day_chg_pct")
         aid = _alert_id(a)
         rec = rang.get(aid)
         if price is None:
@@ -1817,8 +1876,9 @@ def _bars_txt(bars, still_open):
 # ── analytics ──────────────────────────────────────────────────────────────
 
 def _current_price(state, name):
+    """INDmoney live price from this scan when available, else the latest candle close."""
     info = state.get(name) or state.get(INDEX_STATE_PREFIX + name) or {}
-    return info.get("last_close")
+    return info.get("ltp") or info.get("last_close")
 
 
 def outcome(sig, now_px):
@@ -2179,7 +2239,7 @@ def _alerts_html(state, cfg):
         rec = rang.get(_alert_id(a))
         status = (f'<span class="tag ok">rang {e(fmt_stamp(rec["time"]))}</span>' if rec
                   else ('<span class="tag mute">unknown symbol</span>' if not info else '<span class="tag mute">waiting</span>'))
-        rows.append(f'<tr><td>{_tv(sym)}</td><td>{e(rule)}</td><td class="r">{_fmt_price(info.get("last_close"))}</td>'
+        rows.append(f'<tr><td>{_tv(sym)}</td><td>{e(rule)}</td><td class="r">{_fmt_price(info.get("ltp") or info.get("last_close"))}</td>'
                     f'<td class="r">{_pct(info.get("day_chg_pct"))}</td><td>{status}</td><td class="mu">{e(a.get("note", ""))}</td></tr>')
     body = "".join(rows) or (f'<tr><td colspan="6" class="empty">No price alerts yet. Add rules such as '
                              f'<code>{{"symbol": "RELIANCE", "above": 1500}}</code> to the <code>alerts</code> list in '
@@ -2223,7 +2283,7 @@ def write_dashboard(state):
         ix_html.append(
             f'<div class="panel ix {"up" if (info.get("day_chg_pct") or 0) > 0 else ("dn" if (info.get("day_chg_pct") or 0) < 0 else "")}">'
             f'<div class="nm" title="{e(name)}">{_tv(name, "")}</div>'
-            f'<div class="px">{_fmt_price(info.get("last_close"))}</div>'
+            f'<div class="px">{_fmt_price(info.get("ltp") or info.get("last_close"))}</div>'
             f'<div class="ft">{_pct(info.get("day_chg_pct"))}'
             f'<span class="sm">{dist_txt}</span></div>'
             f'<div class="tags">{_st_tag(info.get("st_trend"))}{_adx_tag(info.get("adx_cond"))}</div>'
@@ -2479,13 +2539,13 @@ def write_dashboard(state):
         stock_rows.append(
             f'<tr data-sym="{e(sym)}" data-sector="{e(sector)}" data-stale="{int(sym in stale)}" data-today="{int(sym in sig_today)}" '
             f'data-st="{st}" data-adx="{adx}" data-dist="{dist if dist is not None else 999}" '
-            f'data-chg="{chg if chg is not None else 0}" data-px="{info.get("last_close") or 0}" '
+            f'data-chg="{chg if chg is not None else 0}" data-px="{info.get("ltp") or info.get("last_close") or 0}" '
             f'data-mv="{mv if mv is not None else -999}" '
             f'data-gc="{info.get("gc", 0)}" data-gcd="{info.get("gc_days", 999) if info.get("gc") else 999}" '
             f'data-gck="{info.get("gc", 0) * 10000 - (info.get("gc_days") or 0)}"'
             f'{" class=fresh" if sym in fresh else ""}>'
             f'<td><button class="star" data-fav="{e(sym)}" aria-label="Favourite">☆</button>{_tv(sym)}{stale_tag}</td>'
-            f'<td class="mu hide-md">{e(sector)}</td><td class="r">{_fmt_price(info.get("last_close"))}</td>'
+            f'<td class="mu hide-md">{e(sector)}</td><td class="r">{_fmt_price(info.get("ltp") or info.get("last_close"))}</td>'
             f'<td class="r">{_pct(chg)}</td><td>{_st_tag(st)}</td>'
             f'<td>{_adx_tag(adx)}</td><td>{_gc_tag(info)}</td>'
             f'<td class="r">{dist_s}</td>'
@@ -2533,7 +2593,7 @@ document.documentElement.dataset.theme=t;}}catch(e){{}}</script>
 <body data-scanned="{e(scanned_iso)}">
 <div class="top"><div class="wrap">
 <div class="bar1"><div class="brand"><div class="logo"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l5-5 4 4 8-9"/><path d="M15 7h5v5"/></svg></div><div style="min-width:0"><h1>Technical Dashboard</h1>
-<div class="sub">SuperTrend ({ATR_PERIOD}×{MULTIPLIER:g}) + ADX DI · {sub}</div></div></div>
+<div class="sub">SuperTrend ({ATR_PERIOD}×{MULTIPLIER:g}) + ADX DI · {sub} · prices: {e(meta.get("prices", "Yahoo · ~15 min delayed"))}</div></div></div>
 <div class="tools-r"><button class="fbtn on" id="focus" title="Focus: only Nifty 100 stocks + indices, and only signals from 9:45 AM to 2:30 PM. Click to show everything.">Focus</button>
 <span class="status" id="status"><i></i><span class="lbl">Waiting</span></span>
 <button class="iconbtn theme" id="theme" title="Light / dark" aria-label="Switch light or dark theme">
@@ -3036,6 +3096,8 @@ def scan_once(per_symbol_delay=None, backfill=False):
     n100 = load_nifty100() or state.get(SCAN_META_KEY, {}).get("n100", [])
     state[SCAN_META_KEY] = {"time": now_str, "checked": checked, "total": len(universe), "sectors": sectors,
                             "universe": universe, "n100": n100}
+
+    state[SCAN_META_KEY]["prices"] = apply_live_quotes(state, universe, now_str)
 
     # double confirmations completed by this scan's signals
     new_conf = [c for c in find_confluence(state[SIGNAL_LOG_KEY]).get(now_str[:10], []) if c["time"] == now_str]
