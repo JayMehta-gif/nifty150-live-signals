@@ -20,7 +20,15 @@ except Exception as e:  # noqa: BLE001
     print("1. login (/generate/token): FAILED —", e)
     sys.exit(1)
 try:
-    eq = indstocks.equity_codes(indstocks.instruments("equity"))
+    raw_eq = indstocks.instruments("equity")
+    lines = raw_eq.splitlines()
+    print("   equity CSV header:", lines[0][:400])
+    for ln in [l for l in lines if "RELIANCE" in l.upper() or "HDFCBANK" in l.upper() or ",TCS" in l.upper()][:6]:
+        print("   sample:", ln[:300])
+    raw_ix = indstocks.instruments("index")
+    print("   index CSV header:", raw_ix.splitlines()[0][:200])
+    print("   NSE indices:", [l.split(",")[1] for l in raw_ix.splitlines()[1:] if l.startswith("NSE,")][:60])
+    eq = indstocks.equity_codes(raw_eq)
     print(f"2. instruments (equity): OK — {len(eq)} NSE symbols, RELIANCE = {eq.get('RELIANCE')}")
 except Exception as e:  # noqa: BLE001
     print("2. instruments: FAILED —", e)
