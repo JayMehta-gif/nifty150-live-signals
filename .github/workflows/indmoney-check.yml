@@ -1,0 +1,23 @@
+name: INDmoney check
+
+# One click (Actions → INDmoney check → Run workflow): logs in to the INDstocks
+# API with the repository secrets and fetches one quote and one day of candles,
+# printing what INDmoney answers. Secrets are never printed.
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Check the INDmoney connection
+        env:
+          INDSTOCKS_CLIENT_ID: ${{ secrets.INDSTOCKS_CLIENT_ID }}
+          INDSTOCKS_MPIN: ${{ secrets.INDSTOCKS_MPIN }}
+          INDSTOCKS_TOTP_SECRET: ${{ secrets.INDSTOCKS_TOTP_SECRET }}
+        run: python -u indstocks_check.py
